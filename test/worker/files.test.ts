@@ -7,6 +7,13 @@ import {
 } from "../../src/shared/upload-keys.ts";
 import { onePixelGif, onePixelPng } from "../fixtures.ts";
 import {
+  onePixelAvif,
+  onePixelJpeg,
+  onePixelWebp,
+  tinyMp4,
+  tinyWebm,
+} from "../media-fixtures.ts";
+import {
   startWorkerd,
   testAdminKey,
   type WorkerdServer,
@@ -114,6 +121,149 @@ describe("File creation and public reads", () => {
       },
     });
     expect(object?.etag).not.toBe(body.etag);
+  });
+
+  test("recognizes every supported File type from representative bytes", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const fixtures = [
+      ["image/jpeg", onePixelJpeg],
+      ["image/png", onePixelPng],
+      ["image/webp", onePixelWebp],
+      ["image/avif", onePixelAvif],
+      ["image/gif", onePixelGif],
+      ["video/mp4", tinyMp4],
+      ["video/webm", tinyWebm],
+    ] as const;
+
+    for (const [contentType, bytes] of fixtures) {
+      const response = await fetch(`${workerd.url}/api/files`, {
+        body: bytes,
+        headers: uploadHeaders(uploadKey.key),
+        method: "POST",
+      });
+
+      expect(response.status).toBe(201);
+      const created = fileUploadResponseSchema.parse(await response.json());
+      expect(created).toMatchObject({ contentType, size: bytes.byteLength });
+      const publicResponse = await fetch(created.url);
+      expect(publicResponse.headers.get("content-type")).toBe(contentType);
+      expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+        new Uint8Array(bytes),
+      );
+    }
+  });
+
+  test("rejects truncated supported formats with the stable media error", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const fixtures = [
+      onePixelJpeg,
+      onePixelPng,
+      onePixelWebp,
+      onePixelAvif,
+      onePixelGif,
+      tinyMp4,
+      tinyWebm,
+    ];
+
+    for (const bytes of fixtures) {
+      const response = await fetch(`${workerd.url}/api/files`, {
+        body: bytes.slice(0, -1),
+        headers: uploadHeaders(uploadKey.key),
+        method: "POST",
+      });
+
+      expect(response.status).toBe(415);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "unsupported_media",
+          message: "The submitted bytes are not a supported File type.",
+        },
+      });
+    }
+  });
+
+  test("rejects malformed supported formats with the stable media error", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const corrupt = (bytes: Uint8Array, offset: number): Uint8Array => {
+      const result = new Uint8Array(bytes);
+      result[offset] = (result[offset] ?? 0) ^ 0xff;
+      return result;
+    };
+    const jpegLengthOffset = onePixelJpeg.findIndex(
+      (byte, index) => byte === 0xff && onePixelJpeg[index + 1] === 0xdb,
+    ) + 2;
+    const webmDocTypeOffset = new TextDecoder().decode(tinyWebm).indexOf("webm");
+    const malformed = [
+      corrupt(onePixelJpeg, jpegLengthOffset),
+      corrupt(onePixelPng, 33),
+      corrupt(onePixelWebp, 4),
+      corrupt(onePixelAvif, 3),
+      corrupt(onePixelGif, onePixelGif.byteLength - 1),
+      corrupt(tinyMp4, 3),
+      corrupt(tinyWebm, webmDocTypeOffset),
+    ];
+
+    for (const bytes of malformed) {
+      const response = await fetch(`${workerd.url}/api/files`, {
+        body: bytes,
+        headers: uploadHeaders(uploadKey.key),
+        method: "POST",
+      });
+
+      expect(response.status).toBe(415);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "unsupported_media",
+          message: "The submitted bytes are not a supported File type.",
+        },
+      });
+    }
+  });
+
+  test("Re-drops between every supported File type with fresh ETags", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const upload = await fetch(`${workerd.url}/api/files`, {
+      body: onePixelPng,
+      headers: uploadHeaders(uploadKey.key),
+      method: "POST",
+    });
+    let current = fileUploadResponseSchema.parse(await upload.json());
+    const fixtures = [
+      ["image/jpeg", onePixelJpeg],
+      ["image/webp", onePixelWebp],
+      ["image/avif", onePixelAvif],
+      ["image/gif", onePixelGif],
+      ["video/mp4", tinyMp4],
+      ["video/webm", tinyWebm],
+      ["image/png", onePixelPng],
+    ] as const;
+
+    for (const [contentType, bytes] of fixtures) {
+      const previous = current;
+      const opaqueId = new URL(previous.url).pathname.slice("/files/".length);
+      const response = await fetch(`${workerd.url}/api/files/${opaqueId}`, {
+        body: bytes,
+        headers: {
+          ...uploadHeaders(uploadKey.key),
+          "if-match": previous.etag,
+        },
+        method: "PUT",
+      });
+
+      expect(response.status).toBe(200);
+      current = fileUploadResponseSchema.parse(await response.json());
+      expect(current).toMatchObject({
+        url: previous.url,
+        contentType,
+        size: bytes.byteLength,
+      });
+      expect(current.etag).not.toBe(previous.etag);
+      const publicResponse = await fetch(current.url, { cache: "no-store" });
+      expect(publicResponse.headers.get("content-type")).toBe(contentType);
+      expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+        new Uint8Array(bytes),
+      );
+    }
   });
 
   test("creates Files with the selected Retention Class", async () => {

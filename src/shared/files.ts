@@ -12,15 +12,16 @@ export {
   type Retention,
 } from "./drops.ts";
 import { retentionSchema } from "./drops.ts";
+export {
+  detectFileContentType,
+  fileContentTypeSchema,
+  maxFileSize,
+  type FileContentType,
+} from "./file-content.ts";
+import { fileContentTypeSchema } from "./file-content.ts";
 
 export const fileKindSchema = z.literal("file");
 export type FileKind = z.infer<typeof fileKindSchema>;
-
-export const fileContentTypeSchema = z.enum([
-  "image/png",
-  "image/gif",
-]);
-export type FileContentType = z.infer<typeof fileContentTypeSchema>;
 
 export const fileUploadResponseSchema = z
   .object({

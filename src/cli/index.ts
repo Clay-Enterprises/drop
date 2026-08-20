@@ -3,6 +3,7 @@
 import {
   chmod,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   realpath,
@@ -10,7 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { z } from "zod";
@@ -30,7 +31,9 @@ import {
   type Retention,
 } from "../shared/drops.ts";
 import {
+  detectFileContentType,
   fileUploadResponseSchema,
+  maxFileSize,
   type FileUploadResponse,
 } from "../shared/files.ts";
 import type {
@@ -434,9 +437,123 @@ function dropKindForPath(path: string): DropKind {
   return path.toLowerCase().endsWith(".html") ? "doc" : "file";
 }
 
+function oversizedFileError(size: number): CliError {
+  return new CliError(
+    `The resulting File is ${(size / (1024 * 1024)).toFixed(1)} MiB; Files must not exceed 95 MiB.`,
+    1,
+  );
+}
+
+function checkFileSize(file: Blob): void {
+  if (file.size > maxFileSize) throw oversizedFileError(file.size);
+}
+
+function ffmpegInstallationHint(): string {
+  if (process.platform === "darwin") {
+    return "Install FFmpeg with Homebrew: brew install ffmpeg.";
+  }
+  if (process.platform === "win32") {
+    return "Install FFmpeg with winget: winget install Gyan.FFmpeg.";
+  }
+  return "Install FFmpeg with your package manager, for example: sudo apt install ffmpeg.";
+}
+
+interface PreparedFile {
+  readonly body: Blob;
+  cleanup(): Promise<void>;
+}
+
+async function processVideo(absolutePath: string): Promise<PreparedFile> {
+  const ffmpeg = Bun.which("ffmpeg");
+  if (ffmpeg === null) {
+    throw new CliError(
+      `FFmpeg is required to process video. ${ffmpegInstallationHint()}`,
+      1,
+    );
+  }
+
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "drop-video-"));
+  const outputPath = join(temporaryDirectory, "processed.mp4");
+  const cleanup = () => rm(temporaryDirectory, { force: true, recursive: true });
+  try {
+    const child = Bun.spawn(
+      [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        absolutePath,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-vf",
+        "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:2",
+        "-nostats",
+        outputPath,
+      ],
+      { stdin: "ignore", stdout: "ignore", stderr: "inherit" },
+    );
+    if ((await child.exited) !== 0) {
+      throw new CliError("FFmpeg could not process the video.", 1);
+    }
+
+    const output = Bun.file(outputPath);
+    if (!(await output.exists())) {
+      throw new CliError("FFmpeg did not produce a video.", 1);
+    }
+    checkFileSize(output);
+    const contentType = detectFileContentType(
+      new Uint8Array(await output.arrayBuffer()),
+    );
+    if (contentType !== "video/mp4") {
+      throw new CliError("FFmpeg did not produce a valid MP4 video.", 1);
+    }
+    return { body: output, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+async function prepareFile(
+  absolutePath: string,
+  file: Blob,
+  raw: boolean,
+): Promise<PreparedFile> {
+  checkFileSize(file);
+  const contentType = detectFileContentType(
+    new Uint8Array(await file.arrayBuffer()),
+  );
+  const video = contentType === "video/mp4" || contentType === "video/webm";
+  if (raw && !video) {
+    throw new CliError("--raw accepts only valid MP4 or WebM Files.", 1);
+  }
+  return video && !raw
+    ? processVideo(absolutePath)
+    : { body: file, cleanup: async () => undefined };
+}
+
 async function uploadDrop(
   pathInput: string,
   retention: Retention | undefined,
+  raw: boolean,
 ): Promise<DropUploadResponse> {
   const resolvedPath = resolve(pathInput);
   const kind = dropKindForPath(resolvedPath);
@@ -445,27 +562,38 @@ async function uploadDrop(
     const label = kind === "doc" ? "Doc" : "File";
     throw new CliError(`The ${label} does not exist: ${resolvedPath}`, 1);
   }
+  if (raw && kind === "doc") {
+    throw new CliError("--raw accepts only valid MP4 or WebM Files.", 1);
+  }
 
   const absolutePath = await realpath(resolvedPath);
   const binding = await readLocalBinding(absolutePath);
   const uploadKey = await resolveUploadKey();
   const environment = readApiEnvironment();
-  const response = await sendDrop(
-    absolutePath,
-    file,
-    kind,
-    uploadKey,
-    environment,
-    binding,
-    retention,
-  );
-  if (!response.ok) {
-    throw await responseError(response);
-  }
+  const prepared =
+    kind === "file"
+      ? await prepareFile(absolutePath, file, raw)
+      : { body: file, cleanup: async () => undefined };
+  try {
+    const response = await sendDrop(
+      absolutePath,
+      prepared.body,
+      kind,
+      uploadKey,
+      environment,
+      binding,
+      retention,
+    );
+    if (!response.ok) {
+      throw await responseError(response);
+    }
 
-  const created = parseDropUploadResponse(kind, await response.json());
-  await writeLocalBinding(absolutePath, created);
-  return created;
+    const created = parseDropUploadResponse(kind, await response.json());
+    await writeLocalBinding(absolutePath, created);
+    return created;
+  } finally {
+    await prepared.cleanup();
+  }
 }
 
 async function changeDropRetention(
@@ -553,6 +681,7 @@ async function changeDropRetention(
 type UploadCommand = {
   readonly json: boolean;
   readonly path: string;
+  readonly raw: boolean;
   readonly retention: Retention | undefined;
 };
 
@@ -563,11 +692,16 @@ function parseUploadCommand(arguments_: string[]): UploadCommand | undefined {
   }
 
   let json = false;
+  let raw = false;
   let retention: Retention | undefined;
   for (let index = 1; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--json" && !json) {
       json = true;
+      continue;
+    }
+    if (argument === "--raw" && !raw) {
+      raw = true;
       continue;
     }
     if (argument === "--retention" && retention === undefined) {
@@ -585,7 +719,7 @@ function parseUploadCommand(arguments_: string[]): UploadCommand | undefined {
     return undefined;
   }
 
-  return { json, path, retention };
+  return { json, path, raw, retention };
 }
 
 async function runAdminCommand(arguments_: string[]): Promise<number> {
@@ -673,6 +807,7 @@ async function main(arguments_: string[]): Promise<number> {
     const created = await uploadDrop(
       uploadCommand.path,
       uploadCommand.retention,
+      uploadCommand.raw,
     );
     console.log(
       uploadCommand.json
@@ -683,7 +818,7 @@ async function main(arguments_: string[]): Promise<number> {
   }
 
   throw new CliError(
-    "Usage: drop <path> [--retention 7d|30d|90d|keep] [--json] | drop retention <path-or-url> <retention> [--json] | drop auth set",
+    "Usage: drop <path> [--retention 7d|30d|90d|keep] [--raw] [--json] | drop retention <path-or-url> <retention> [--json] | drop auth set",
     2,
   );
 }

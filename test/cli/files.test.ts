@@ -1,18 +1,27 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  chmod,
   mkdtemp,
+  mkdir,
   readFile,
   realpath,
   readdir,
   rename,
   rm,
   stat,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { onePixelGif, onePixelPng } from "../fixtures.ts";
+import {
+  onePixelAvif,
+  onePixelJpeg,
+  tinyMp4,
+  tinyWebm,
+} from "../media-fixtures.ts";
 import {
   createdUploadKeySchema,
   type CreatedUploadKey,
@@ -28,6 +37,8 @@ interface CliResult {
   readonly stderr: string;
   readonly stdout: string;
 }
+
+const maxFileSize = 95 * 1024 * 1024;
 
 async function createUploadKey(
   workerd: WorkerdServer,
@@ -62,8 +73,8 @@ async function runCli(
     }
   }
 
-  const process = Bun.spawn(
-    ["bun", "run", resolve("src/cli/index.ts"), ...arguments_],
+  const child = Bun.spawn(
+    [process.execPath, "run", resolve("src/cli/index.ts"), ...arguments_],
     {
       cwd: options.cwd,
       env: environment,
@@ -72,12 +83,12 @@ async function runCli(
       stdout: "pipe",
     },
   );
-  process.stdin.write(options.stdin ?? "");
-  process.stdin.end();
+  child.stdin.write(options.stdin ?? "");
+  child.stdin.end();
   const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
   ]);
   return { exitCode, stderr, stdout };
 }
@@ -103,6 +114,25 @@ describe("drop File", () => {
     const path = await mkdtemp(join(tmpdir(), "drop-cli-files-"));
     temporaryDirectories.push(path);
     return path;
+  }
+
+  async function installFakeFfmpeg(
+    directory: string,
+    output: Uint8Array | "oversized",
+  ): Promise<string> {
+    const binDirectory = join(directory, "bin");
+    await mkdir(binDirectory);
+    const executable = join(binDirectory, "ffmpeg");
+    const outputStatement =
+      output === "oversized"
+        ? `await Bun.write(outputPath, new Uint8Array());\ntruncateSync(outputPath, ${maxFileSize + 1});`
+        : `await Bun.write(outputPath, Uint8Array.from(atob("${Buffer.from(output).toString("base64")}"), (character) => character.charCodeAt(0)));`;
+    await writeFile(
+      executable,
+      `#!/usr/bin/env bun\nimport { truncateSync } from "node:fs";\nconst outputPath = Bun.argv.at(-1);\nif (outputPath === undefined) process.exit(2);\n${outputStatement}\nconsole.error("frame=1");\nconsole.error("progress=end");\n`,
+    );
+    await chmod(executable, 0o700);
+    return `${binDirectory}:${Bun.env.PATH ?? ""}`;
   }
 
   test("prints only the URL and writes a credential-free path binding", async () => {
@@ -198,6 +228,230 @@ describe("drop File", () => {
     expect(publicResponse.headers.get("content-type")).toBe("image/gif");
     expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
       onePixelGif,
+    );
+  });
+
+  test("processes video to an observable fast-start H.264 and AAC MP4", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "clip.webm");
+    await writeFile(path, tinyWebm);
+    const uploadKey = await createUploadKey(workerd);
+    const ffmpegPath = await installFakeFfmpeg(directory, tinyMp4);
+    expect(new TextDecoder().decode(tinyWebm)).toContain("private-title");
+
+    const result = await runCli(workerd, [path], {
+      cwd: directory,
+      environment: { DROP_UPLOAD_KEY: uploadKey.key, PATH: ffmpegPath },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(
+      new RegExp(`^${workerd.url}/files/[A-Za-z0-9_-]{32}\\n$`),
+    );
+    expect(result.stderr).toContain("progress=end");
+    expect(result.stdout).not.toContain("progress=");
+    const publicResponse = await fetch(result.stdout.trim());
+    expect(publicResponse.headers.get("content-type")).toBe("video/mp4");
+    const uploaded = new Uint8Array(await publicResponse.arrayBuffer());
+    const containerText = new TextDecoder().decode(uploaded);
+    expect(containerText).toContain("avc1");
+    expect(containerText).toContain("mp4a");
+    expect(containerText.indexOf("moov")).toBeLessThan(
+      containerText.indexOf("mdat"),
+    );
+    expect(containerText).not.toContain("private-title");
+  });
+
+  test("Re-drops processed video as unchanged raw WebM at the same URL", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "changing-video.webm");
+    await writeFile(path, tinyWebm);
+    const uploadKey = await createUploadKey(workerd);
+    const environment = {
+      DROP_UPLOAD_KEY: uploadKey.key,
+      PATH: await installFakeFfmpeg(directory, tinyMp4),
+    };
+    const processed = await runCli(workerd, [path, "--json"], {
+      cwd: directory,
+      environment,
+    });
+    expect(processed.exitCode).toBe(0);
+    const first = JSON.parse(processed.stdout) as { etag: string; url: string };
+
+    const raw = await runCli(workerd, [path, "--raw", "--json"], {
+      cwd: directory,
+      environment,
+    });
+
+    expect(raw.exitCode).toBe(0);
+    expect(raw.stderr).toBe("");
+    expect(JSON.parse(raw.stdout)).toMatchObject({
+      url: first.url,
+      contentType: "video/webm",
+      size: tinyWebm.byteLength,
+      etag: expect.not.stringMatching(first.etag),
+    });
+    const publicResponse = await fetch(first.url, { cache: "no-store" });
+    expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+      new Uint8Array(tinyWebm),
+    );
+  });
+
+  test("uploads valid raw MP4 bytes unchanged", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "raw.mp4");
+    await writeFile(path, tinyMp4);
+    const uploadKey = await createUploadKey(workerd);
+
+    const result = await runCli(workerd, [path, "--raw", "--json"], {
+      cwd: directory,
+      environment: { DROP_UPLOAD_KEY: uploadKey.key },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    const created = JSON.parse(result.stdout) as {
+      contentType: string;
+      size: number;
+      url: string;
+    };
+    expect(created).toMatchObject({
+      contentType: "video/mp4",
+      size: tinyMp4.byteLength,
+    });
+    expect(new Uint8Array(await (await fetch(created.url)).arrayBuffer())).toEqual(
+      new Uint8Array(tinyMp4),
+    );
+  });
+
+  test("rejects --raw for non-video Files before upload", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "pixel.png");
+    await writeFile(path, onePixelPng);
+    const uploadKey = await createUploadKey(workerd);
+    const before = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+
+    const result = await runCli(workerd, [path, "--raw"], {
+      cwd: directory,
+      environment: { DROP_UPLOAD_KEY: uploadKey.key },
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stderr: "error: --raw accepts only valid MP4 or WebM Files.\n",
+      stdout: "",
+    });
+    const after = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+    expect(after.objects).toHaveLength(before.objects.length);
+  });
+
+  test("reports a platform installation hint when FFmpeg is missing", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "clip.webm");
+    await writeFile(path, tinyWebm);
+    const uploadKey = await createUploadKey(workerd);
+    const before = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+    const installationHint =
+      process.platform === "darwin"
+        ? "Install FFmpeg with Homebrew: brew install ffmpeg."
+        : process.platform === "win32"
+          ? "Install FFmpeg with winget: winget install Gyan.FFmpeg."
+          : "Install FFmpeg with your package manager, for example: sudo apt install ffmpeg.";
+
+    const result = await runCli(workerd, [path], {
+      cwd: directory,
+      environment: {
+        DROP_UPLOAD_KEY: uploadKey.key,
+        PATH: join(directory, "empty-bin"),
+      },
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stderr: `error: FFmpeg is required to process video. ${installationHint}\n`,
+      stdout: "",
+    });
+    const after = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+    expect(after.objects).toHaveLength(before.objects.length);
+  });
+
+  test("rejects raw and processed output above 95 MiB before upload", async () => {
+    const directory = await temporaryDirectory();
+    const uploadKey = await createUploadKey(workerd);
+    const before = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+    const oversizedRawPath = join(directory, "oversized.mp4");
+    await writeFile(oversizedRawPath, tinyMp4);
+    await truncate(oversizedRawPath, maxFileSize + 1);
+    const raw = await runCli(workerd, [oversizedRawPath, "--raw"], {
+      cwd: directory,
+      environment: { DROP_UPLOAD_KEY: uploadKey.key },
+    });
+    expect(raw).toEqual({
+      exitCode: 1,
+      stderr:
+        "error: The resulting File is 95.0 MiB; Files must not exceed 95 MiB.\n",
+      stdout: "",
+    });
+
+    const videoPath = join(directory, "processed.webm");
+    await writeFile(videoPath, tinyWebm);
+    const processed = await runCli(workerd, [videoPath], {
+      cwd: directory,
+      environment: {
+        DROP_UPLOAD_KEY: uploadKey.key,
+        PATH: await installFakeFfmpeg(directory, "oversized"),
+      },
+    });
+    expect(processed).toEqual({
+      exitCode: 1,
+      stderr:
+        "frame=1\nprogress=end\nerror: The resulting File is 95.0 MiB; Files must not exceed 95 MiB.\n",
+      stdout: "",
+    });
+    const after = (await (
+      await fetch(`${workerd.url}/__test/content-objects`)
+    ).json()) as { objects: unknown[] };
+    expect(after.objects).toHaveLength(before.objects.length);
+  });
+
+  test("Re-drops alternate image types unchanged with detected type changes", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "changing-image");
+    await writeFile(path, onePixelJpeg);
+    const uploadKey = await createUploadKey(workerd);
+    const environment = { DROP_UPLOAD_KEY: uploadKey.key };
+    const first = await runCli(workerd, [path, "--json"], {
+      cwd: directory,
+      environment,
+    });
+    expect(first.exitCode).toBe(0);
+    const created = JSON.parse(first.stdout) as { etag: string; url: string };
+    await writeFile(path, onePixelAvif);
+
+    const second = await runCli(workerd, [path, "--json"], {
+      cwd: directory,
+      environment,
+    });
+
+    expect(second.exitCode).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({
+      url: created.url,
+      contentType: "image/avif",
+      size: onePixelAvif.byteLength,
+      etag: expect.not.stringMatching(created.etag),
+    });
+    expect(new Uint8Array(await (await fetch(created.url)).arrayBuffer())).toEqual(
+      new Uint8Array(onePixelAvif),
     );
   });
 
