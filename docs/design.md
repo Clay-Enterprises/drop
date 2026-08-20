@@ -13,7 +13,7 @@ This service is for convenient sharing, including proprietary material, but not 
 - Docs use `https://drop.clay.sh/docs/<opaque-id>`.
 - Files and Docs are immutable to everyone except the exact Upload Key that created them.
 - Dropping the same normalized absolute local path again replaces its content at the same URL.
-- Re-drops are guarded by ETags and fail on concurrent modification.
+- Re-drops are guarded by API write ETags and fail on concurrent modification.
 - Content is not cached by Drop. Direct browser refreshes observe the latest successful Re-drop.
 - Downstream caches and copies are outside Drop's guarantees.
 
@@ -54,6 +54,8 @@ R2 is the only persistent server-side store. There is no database, KV namespace,
 
 Public reads support `GET`, `HEAD`, byte ranges, ETags, `If-None-Match`, and `Content-Length`. CORS is disabled. Files and Docs render inline.
 
+Public reads expose R2's content ETag. Authenticated write responses expose a distinct random write ETag stored in the object's custom metadata. A content ETag can recur when a Re-drop restores earlier bytes, so CLI bindings use the write ETag for `If-Match`. The final R2 write also pins the observed upload time to reject simultaneous same-byte replacements atomically.
+
 Cloudflare rules bypass caching for the entire hostname and apply `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `X-Robots-Tag: noindex, nofollow, noarchive`. Docs also receive the restrictive sandbox Content Security Policy defined by the HTML communication contract.
 
 ## Credentials
@@ -86,7 +88,7 @@ DELETE /api/docs/:id           Admin deletion
 GET    /api/docs               Admin inventory
 ```
 
-The unversioned API uses Bearer authentication. Upload bodies are raw bytes. `Drop-Retention` carries the Retention Class and standard `Content-Disposition` carries the original filename. A retention-only `PATCH` uses JSON. Conditional writes use `If-Match`.
+The unversioned API uses Bearer authentication. Upload bodies are raw bytes. `Drop-Retention` carries the Retention Class and standard `Content-Disposition` carries the original filename. A retention-only `PATCH` uses JSON. Conditional writes use `If-Match` with the API write ETag.
 
 Creation returns `201 Created`, successful writes return `200 OK`, and deletion returns `204 No Content`. Successful write responses include the URL, kind, detected content type, size, retention, expiry, and ETag. Creation also sets `Location`.
 

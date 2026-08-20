@@ -1,9 +1,18 @@
 import { Hono } from "hono";
 import { z } from "zod";
 
-import { opaqueIdSchema } from "../shared/files.ts";
+import {
+  opaqueIdSchema,
+  type FileContentType,
+} from "../shared/files.ts";
 import { credentialIdSchema } from "../shared/upload-keys.ts";
-import { createFile, isPng, readUploadBody, serveFile } from "./files.ts";
+import {
+  createFile,
+  detectFileContentType,
+  readUploadBody,
+  replaceFile,
+  serveFile,
+} from "./files.ts";
 import {
   authenticateUploadKey,
   createUploadKey,
@@ -65,6 +74,75 @@ function parseOriginalFilename(
     : undefined;
 }
 
+type FileUploadInput = {
+  readonly body: Blob;
+  readonly contentType: FileContentType;
+  readonly originalFilename: string;
+};
+
+type FileUploadInputResult =
+  | { readonly status: "error"; readonly response: Response }
+  | { readonly status: "ok"; readonly input: FileUploadInput };
+
+function jsonError(
+  code: string,
+  message: string,
+  status: number,
+): Response {
+  return Response.json({ error: { code, message } }, { status });
+}
+
+async function readFileUploadRequest(
+  request: Request,
+): Promise<FileUploadInputResult> {
+  const originalFilename = parseOriginalFilename(
+    request.headers.get("Content-Disposition") ?? undefined,
+  );
+  if (originalFilename === undefined) {
+    return {
+      status: "error",
+      response: jsonError(
+        "invalid_request",
+        "Content-Disposition must contain an original filename.",
+        400,
+      ),
+    };
+  }
+
+  const upload = await readUploadBody(request);
+  if (upload.status === "too_large") {
+    return {
+      status: "error",
+      response: jsonError(
+        "payload_too_large",
+        "Files must not exceed 95 MiB.",
+        413,
+      ),
+    };
+  }
+
+  const contentType = await detectFileContentType(upload.body);
+  return contentType === undefined
+    ? {
+        status: "error",
+        response: jsonError(
+          "unsupported_media",
+          "The submitted bytes are not a supported File type.",
+          415,
+        ),
+      }
+    : {
+        status: "ok",
+        input: { body: upload.body, contentType, originalFilename },
+      };
+}
+
+function bearerCredential(authorization: string | undefined): string {
+  return authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : "";
+}
+
 const app = new Hono<{ Bindings: WorkerBindings }>();
 
 app.use("/api/admin/*", async (context, next) => {
@@ -109,63 +187,25 @@ app.delete("/api/admin/keys/:credentialId", async (context) => {
 });
 
 app.post("/api/files", async (context) => {
-  const authorization = context.req.header("Authorization");
-  const uploadKey = authorization?.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
-    : "";
   const credentialId = await authenticateUploadKey(
     context.env.CONTROL_STORE,
-    uploadKey,
+    bearerCredential(context.req.header("Authorization")),
   );
   if (credentialId === undefined) {
     return context.json(invalidCredential, 401);
   }
 
-  const originalFilename = parseOriginalFilename(
-    context.req.header("Content-Disposition"),
-  );
-  if (originalFilename === undefined) {
-    return context.json(
-      {
-        error: {
-          code: "invalid_request",
-          message: "Content-Disposition must contain an original filename.",
-        },
-      },
-      400,
-    );
-  }
-
-  const upload = await readUploadBody(context.req.raw);
-  if (upload.status === "too_large") {
-    return context.json(
-      {
-        error: {
-          code: "payload_too_large",
-          message: "Files must not exceed 95 MiB.",
-        },
-      },
-      413,
-    );
-  }
-
-  if (!(await isPng(upload.body))) {
-    return context.json(
-      {
-        error: {
-          code: "unsupported_media",
-          message: "The submitted bytes are not a supported File type.",
-        },
-      },
-      415,
-    );
+  const upload = await readFileUploadRequest(context.req.raw);
+  if (upload.status === "error") {
+    return upload.response;
   }
 
   const created = await createFile(
     context.env.CONTENT_STORE,
-    upload.body,
+    upload.input.body,
+    upload.input.contentType,
     credentialId,
-    originalFilename,
+    upload.input.originalFilename,
     new URL(context.req.url).origin,
   );
   console.log(
@@ -183,6 +223,100 @@ app.post("/api/files", async (context) => {
 
   context.header("Location", created.url);
   return context.json(created, 201);
+});
+
+app.put("/api/files/:opaqueId", async (context) => {
+  const credentialId = await authenticateUploadKey(
+    context.env.CONTROL_STORE,
+    bearerCredential(context.req.header("Authorization")),
+  );
+  if (credentialId === undefined) {
+    return context.json(invalidCredential, 401);
+  }
+
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      {
+        error: {
+          code: "not_found",
+          message: "The File does not exist.",
+        },
+      },
+      404,
+    );
+  }
+
+  const observedEtag = context.req.header("If-Match");
+  if (observedEtag === undefined) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "If-Match is required to Re-drop a File.",
+        },
+      },
+      400,
+    );
+  }
+
+  const upload = await readFileUploadRequest(context.req.raw);
+  if (upload.status === "error") {
+    return upload.response;
+  }
+
+  const result = await replaceFile(
+    context.env.CONTENT_STORE,
+    opaqueId.data,
+    upload.input.body,
+    upload.input.contentType,
+    credentialId,
+    upload.input.originalFilename,
+    observedEtag,
+    new URL(context.req.url).origin,
+  );
+  if (result.status === "missing") {
+    return context.json(
+      { error: { code: "not_found", message: "The File does not exist." } },
+      404,
+    );
+  }
+  if (result.status === "forbidden") {
+    return context.json(
+      {
+        error: {
+          code: "wrong_owner",
+          message: "This Upload Key did not create the File.",
+        },
+      },
+      403,
+    );
+  }
+  if (result.status === "stale") {
+    return context.json(
+      {
+        error: {
+          code: "stale_object",
+          message: "The Drop changed since this client last observed it.",
+        },
+      },
+      409,
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId,
+      url: result.response.url,
+      kind: result.response.kind,
+      size: result.response.size,
+      retention: result.response.retention,
+      outcome: "replaced",
+      status: 200,
+    }),
+  );
+  return context.json(result.response);
 });
 
 app.on(["GET", "HEAD"], "/files/:opaqueId", async (context) => {

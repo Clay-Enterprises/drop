@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  realpath,
   rename,
   rm,
   writeFile,
@@ -16,8 +17,11 @@ import { z } from "zod";
 import { errorResponseSchema } from "../shared/errors.ts";
 import {
   fileUploadResponseSchema,
+  localBindingSchema,
+  opaqueIdSchema,
   type FileUploadResponse,
   type LocalBinding,
+  type LocalBindingContent,
 } from "../shared/files.ts";
 import type {
   CreatedUploadKey,
@@ -218,10 +222,10 @@ function encodedFilename(filename: string): string {
   return `inline; filename*=UTF-8''${encoded}`;
 }
 
-async function pathHash(path: string): Promise<string> {
+async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(path),
+    new TextEncoder().encode(value),
   );
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -232,38 +236,152 @@ async function writeLocalBinding(
   absolutePath: string,
   response: FileUploadResponse,
 ): Promise<void> {
-  const binding: LocalBinding = {
+  const content: LocalBindingContent = {
     path: absolutePath,
     url: response.url,
     kind: response.kind,
     etag: response.etag,
     retention: response.retention,
   };
-  const filename = `${await pathHash(absolutePath)}.json`;
-  await atomicWriteJson(
-    join(stateRoot(), "drop", "bindings", filename),
-    binding,
+  const binding: LocalBinding = {
+    ...content,
+    checksum: await bindingChecksum(content),
+    formatVersion: 1,
+  };
+  await atomicWriteJson(await localBindingPath(absolutePath), binding);
+}
+
+function canonicalBindingContent(binding: LocalBindingContent): string {
+  return JSON.stringify({
+    path: binding.path,
+    url: binding.url,
+    kind: binding.kind,
+    etag: binding.etag,
+    retention: binding.retention,
+  });
+}
+
+function bindingChecksum(binding: LocalBindingContent): Promise<string> {
+  return sha256Hex(canonicalBindingContent(binding));
+}
+
+async function localBindingPath(absolutePath: string): Promise<string> {
+  return join(
+    stateRoot(),
+    "drop",
+    "bindings",
+    `${await sha256Hex(absolutePath)}.json`,
   );
 }
 
-async function uploadFile(pathInput: string): Promise<FileUploadResponse> {
-  const absolutePath = resolve(pathInput);
-  const file = Bun.file(absolutePath);
-  if (!(await file.exists())) {
-    throw new CliError(`The File does not exist: ${absolutePath}`, 1);
+async function readLocalBinding(
+  absolutePath: string,
+): Promise<LocalBinding | undefined> {
+  let contents: string;
+  try {
+    contents = await readFile(await localBindingPath(absolutePath), "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
   }
 
+  try {
+    const binding = localBindingSchema.parse(JSON.parse(contents));
+    const url = new URL(binding.url);
+    const opaqueId = opaqueIdSchema.safeParse(
+      /^\/files\/([^/]+)$/.exec(url.pathname)?.[1],
+    );
+    const checksum = await bindingChecksum(binding);
+    if (
+      binding.path !== absolutePath ||
+      !opaqueId.success ||
+      ("checksum" in binding && binding.checksum !== checksum)
+    ) {
+      throw new Error("invalid binding identity");
+    }
+    return binding;
+  } catch {
+    throw new CliError(
+      `The local binding for this path is corrupt: ${absolutePath}`,
+      1,
+    );
+  }
+}
+
+function replacementApiPath(binding: LocalBinding): string {
+  const opaqueId = opaqueIdSchema.parse(
+    /^\/files\/([^/]+)$/.exec(new URL(binding.url).pathname)?.[1],
+  );
+  return `/api/files/${opaqueId}`;
+}
+
+async function sendFile(
+  absolutePath: string,
+  file: Blob,
+  uploadKey: string,
+  environment: z.infer<typeof apiEnvironmentSchema>,
+  binding: LocalBinding | undefined,
+): Promise<Response> {
+  const apiOrigin = new URL(environment.DROP_API_URL).origin;
+  if (binding !== undefined) {
+    const bindingOrigin = new URL(binding.url).origin;
+    if (bindingOrigin !== apiOrigin) {
+      throw new CliError(
+        `The local binding belongs to ${bindingOrigin}, not ${apiOrigin}.`,
+        1,
+      );
+    }
+  }
+
+  const response = await fetch(
+    new URL(
+      binding === undefined ? "/api/files" : replacementApiPath(binding),
+      environment.DROP_API_URL,
+    ),
+    {
+      body: file,
+      headers: {
+        authorization: `Bearer ${uploadKey}`,
+        "content-disposition": encodedFilename(basename(absolutePath)),
+        "content-type": "application/octet-stream",
+        ...(binding === undefined ? {} : { "if-match": binding.etag }),
+      },
+      method: binding === undefined ? "POST" : "PUT",
+    },
+  );
+
+  if (response.status === 404 && binding !== undefined) {
+    if (!("formatVersion" in binding)) {
+      throw new CliError(
+        `The legacy local binding could not be verified: ${absolutePath}`,
+        1,
+      );
+    }
+    return sendFile(absolutePath, file, uploadKey, environment, undefined);
+  }
+  return response;
+}
+
+async function uploadFile(pathInput: string): Promise<FileUploadResponse> {
+  const resolvedPath = resolve(pathInput);
+  const file = Bun.file(resolvedPath);
+  if (!(await file.exists())) {
+    throw new CliError(`The File does not exist: ${resolvedPath}`, 1);
+  }
+
+  const absolutePath = await realpath(resolvedPath);
+  const binding = await readLocalBinding(absolutePath);
   const uploadKey = await resolveUploadKey();
   const environment = readApiEnvironment();
-  const response = await fetch(new URL("/api/files", environment.DROP_API_URL), {
-    body: file,
-    headers: {
-      authorization: `Bearer ${uploadKey}`,
-      "content-disposition": encodedFilename(basename(absolutePath)),
-      "content-type": "application/octet-stream",
-    },
-    method: "POST",
-  });
+  const response = await sendFile(
+    absolutePath,
+    file,
+    uploadKey,
+    environment,
+    binding,
+  );
   if (!response.ok) {
     throw await responseError(response);
   }

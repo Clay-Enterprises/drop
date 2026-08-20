@@ -46,6 +46,13 @@ app.get("/__test/content-objects", async (context) => {
   });
 });
 
+app.delete("/__test/content-objects/:opaqueId", async (context) => {
+  await context.env.CONTENT_STORE.delete(
+    `files/${context.req.param("opaqueId")}`,
+  );
+  return context.body(null, 204);
+});
+
 app.route("/", dropWorker);
 
 export default app;

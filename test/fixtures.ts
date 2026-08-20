@@ -5,3 +5,11 @@ export const onePixelPng = Uint8Array.from(
   atob(onePixelPngBase64),
   (character) => character.charCodeAt(0),
 );
+
+const onePixelGifBase64 =
+  "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+export const onePixelGif = Uint8Array.from(
+  atob(onePixelGifBase64),
+  (character) => character.charCodeAt(0),
+);
