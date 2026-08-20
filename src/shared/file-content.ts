@@ -707,7 +707,7 @@ function isWebm(bytes: Uint8Array): boolean {
     if (size === undefined) return false;
     segmentOffset += size.length;
     const end = size.unknown ? segmentEnd : segmentOffset + size.value;
-    if (end > segmentEnd || end <= segmentOffset) return false;
+    if (end > segmentEnd || end < segmentOffset) return false;
     if (id.value === 0x1654ae6b) foundTracks = true;
     if (id.value === 0x1f43b675) foundCluster = true;
     segmentOffset = end;

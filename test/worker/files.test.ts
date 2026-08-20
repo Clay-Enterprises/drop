@@ -22,6 +22,7 @@ import {
   structuredOnlyWebp,
   tinyMp4,
   tinyWebm,
+  webmWithEmptyVoid,
 } from "../media-fixtures.ts";
 import {
   startWorkerd,
@@ -174,6 +175,21 @@ describe("File creation and public reads", () => {
     expect(created).toMatchObject({
       contentType: "video/mp4",
       size: fragmentedMp4.byteLength,
+    });
+  });
+
+  test("recognizes a WebM with an empty Void element", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const response = await fetch(`${workerd.url}/api/files`, {
+      body: webmWithEmptyVoid,
+      headers: uploadHeaders(uploadKey.key),
+      method: "POST",
+    });
+
+    expect(response.status).toBe(201);
+    expect(fileUploadResponseSchema.parse(await response.json())).toMatchObject({
+      contentType: "video/webm",
+      size: webmWithEmptyVoid.byteLength,
     });
   });
 
