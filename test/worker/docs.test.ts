@@ -87,14 +87,16 @@ describe("Doc creation and public reads", () => {
     const html = `<!doctype html>
 <html>
   <head>
-    <style>body { color: white; background-image: url(data:image/png;base64,AA==) }</style>
+    <style id="dynamic-style">body { color: white; background-image: url(data:image/png;base64,AA==) }</style>
   </head>
   <body>
     <svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" /></svg>
     <img src="data:image/png;base64,AA==" alt="Data image">
     <video src="https://cdn.example.com/demo.mp4" controls></video>
     <a href="https://example.com/details" target="_blank">Details</a>
-    <script>const fetch = "ready"; const values = [fetch]; const index = 0; document.querySelector("a")?.classList.add(values[index]);</script>
+    <div id="status">Clone me</div>
+    <pre></pre>
+    <script>const fetch = "ready"; const values = [fetch]; const index = 0; const tag = "span"; let status = document.getElementById("status"); document.body.append(document.createElement(tag)); document.body.append(document.querySelector("div").cloneNode(true)); status.textContent = values[index]; document.querySelector("pre").textContent = "body{background:url(https://example.com/example.png)}"; document.getElementById("dynamic-style").append("p { color: white }"); document.querySelector("a")?.classList.add(values[index]);</script>
   </body>
 </html>`;
 
@@ -181,6 +183,10 @@ describe("Doc creation and public reads", () => {
         "<img><script>const image = document.querySelector('img'); const set = image.setAttribute; set.call(image, 'src', 'https://example.com/pixel.png')</script>",
       ],
       [
+        "attribute-node media mutations",
+        '<img src="data:image/png;base64,AA=="><script>document.querySelector("img").getAttributeNode("src").value="https://example.com/pixel.png"</script>',
+      ],
+      [
         "aliased scripted link activation",
         "<a href='https://example.com' target='_blank'>Open</a><script>const link = document.querySelector('a'); const activate = link.click; document.addEventListener('click', () => activate.call(link))</script>",
       ],
@@ -191,6 +197,102 @@ describe("Doc creation and public reads", () => {
       [
         "scripted navigation",
         "<script>document.location = 'https://example.com'</script>",
+      ],
+      [
+        "bare scripted navigation",
+        "<script>location = 'https://example.com'</script>",
+      ],
+      [
+        "script-created markup",
+        '<script>document.body.innerHTML = "<img src=https://example.com/pixel.png>"</script>',
+      ],
+      [
+        "script-created executable elements",
+        '<script>const script = document.createElement("script"); script.textContent = `const image=document.createElement("img");image.src="https://example.com/pixel.png"`; document.body.append(script)</script>',
+      ],
+      [
+        "script-created forbidden elements",
+        '<script>document.body.append(document.createElement("form"))</script>',
+      ],
+      [
+        "script-created event handlers",
+        '<button id="open">Open</button><script>document.querySelector("#open").setAttribute("onclick", "location=\'https://example.com\'")</script>',
+      ],
+      [
+        "string timer callbacks",
+        '<script>setTimeout("location=\'https://example.com\'", 0)</script>',
+      ],
+      [
+        "constant string timer callbacks",
+        '<script>const callback = "location=\'https://example.com\'"; setTimeout(callback, 0)</script>',
+      ],
+      [
+        "script-created CSS requests",
+        '<div id="preview"></div><script>document.querySelector("#preview").setAttribute("style", "background:url(https://example.com/pixel.png)")</script>',
+      ],
+      [
+        "script-created CSS requests through style aliases",
+        '<script>const css=document.body.style; css.backgroundImage="url(https://example.com/pixel.png)"</script>',
+      ],
+      [
+        "script-created font requests",
+        '<script>new FontFace("demo", "url(https://example.com/font.woff)").load()</script>',
+      ],
+      [
+        "origin-private file storage",
+        '<script>navigator.storage.getDirectory()</script>',
+      ],
+      [
+        "script-created style element requests",
+        '<style></style><script>document.querySelector("style").textContent="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "script-created style requests through element IDs",
+        '<style id="theme"></style><script>document.getElementById("theme").textContent="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "script-appended style requests",
+        '<style id="theme"></style><script>document.querySelector("#theme").append("body{background:url(https://example.com/pixel.png)}")</script>',
+      ],
+      [
+        "script-replaced style requests",
+        '<style id="theme"></style><script>document.querySelector("#theme").replaceChildren("body{background:url(https://example.com/pixel.png)}")</script>',
+      ],
+      [
+        "script-created style requests through descendant selectors",
+        '<head><style></style></head><script>document.querySelector("head style").textContent="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "script-created style requests through element collections",
+        '<style></style><script>const styles = document.querySelectorAll("style"); styles[0].textContent="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "script-created style requests through DOM relationships",
+        '<head><style></style></head><script>document.head.firstElementChild.textContent="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "dynamic script-created style requests through DOM relationships",
+        '<head><style></style></head><script>let css="body{background:url(https://example.com/pixel.png)}"; document.head.firstElementChild.textContent=css</script>',
+      ],
+      [
+        "script-inserted adjacent style requests",
+        '<style></style><script>document.querySelector("style").insertAdjacentText("beforeend", "body{background:url(https://example.com/pixel.png)}")</script>',
+      ],
+      [
+        "script-created style requests through text node values",
+        '<style>body{color:white}</style><script>document.querySelector("style").firstChild.nodeValue="body{background:url(https://example.com/pixel.png)}"</script>',
+      ],
+      [
+        "script-created style requests through character data methods",
+        '<style>body{color:white}</style><script>document.querySelector("style").firstChild.appendData("body{background:url(https://example.com/pixel.png)}")</script>',
+      ],
+      [
+        "script-created style requests through ranges",
+        '<style>body{color:white}</style><script>const range=document.createRange(); range.selectNodeContents(document.querySelector("style")); range.insertNode(document.createTextNode("body{background:url(https://example.com/pixel.png)}"))</script>',
+      ],
+      [
+        "script-created style requests through legacy CSS rules",
+        '<style>body{color:white}</style><script>document.querySelector("style").sheet.addRule("body", "background:url(https://example.com/pixel.png)")</script>',
       ],
       [
         "escaped linked CSS",

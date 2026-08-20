@@ -57,6 +57,7 @@ const forbiddenScriptIdentifiers = new Set([
   "CSSStyleSheet",
   "DOMParser",
   "EventSource",
+  "FontFace",
   "Function",
   "Image",
   "RTCPeerConnection",
@@ -75,6 +76,7 @@ const forbiddenScriptIdentifiers = new Set([
   "globalThis",
   "indexedDB",
   "localStorage",
+  "location",
   "open",
   "opener",
   "parent",
@@ -91,21 +93,30 @@ const forbiddenScriptMembers = new Set([
   "__proto__",
   "__lookupGetter__",
   "__lookupSetter__",
+  "addRule",
   "assign",
+  "attributes",
   "caches",
   "constructor",
   "cssText",
   "cookie",
   "cookieStore",
+  "createContextualFragment",
+  "createRange",
   "defineProperties",
   "defineProperty",
   "defaultView",
+  "execCommand",
   "fetch",
   "getOwnPropertyDescriptor",
   "getOwnPropertyDescriptors",
   "getPrototypeOf",
+  "getAttributeNode",
+  "getAttributeNodeNS",
   "indexedDB",
+  "innerHTML",
   "insertAdjacentHTML",
+  "insertNode",
   "insertRule",
   "localStorage",
   "location",
@@ -115,8 +126,16 @@ const forbiddenScriptMembers = new Set([
   "replaceSync",
   "sendBeacon",
   "serviceWorker",
+  "sheet",
   "sessionStorage",
+  "setAttributeNode",
+  "setAttributeNodeNS",
+  "setHTML",
+  "setHTMLUnsafe",
   "setPrototypeOf",
+  "styleSheets",
+  "storage",
+  "storageBuckets",
   "view",
   "write",
   "writeln",
@@ -124,6 +143,8 @@ const forbiddenScriptMembers = new Set([
 
 const inspectedScriptMethods = new Set([
   "click",
+  "createElement",
+  "createElementNS",
   "dispatchEvent",
   "setAttribute",
   "setAttributeNS",
@@ -142,6 +163,32 @@ const networkAttributeNames = new Set([
   "src",
   "srcdoc",
   "srcset",
+]);
+
+const scriptedCssPropertyNames = new Set([
+  "backdropFilter",
+  "backgroundImage",
+  "borderImage",
+  "borderImageSource",
+  "clipPath",
+  "content",
+  "cursor",
+  "fill",
+  "filter",
+  "listStyle",
+  "listStyleImage",
+  "marker",
+  "markerEnd",
+  "markerMid",
+  "markerStart",
+  "mask",
+  "maskImage",
+  "offsetPath",
+  "shapeOutside",
+  "stroke",
+  "webkitBorderImage",
+  "webkitFilter",
+  "webkitMaskImage",
 ]);
 
 class InvalidDoc extends Error {}
@@ -289,12 +336,15 @@ function validateCss(
   css: string,
   context: "declarationList" | "stylesheet",
   allowRemoteMedia = true,
+  rejectInvalidSyntax = true,
 ): void {
   const ast = parseCss(css, {
     context,
     parseCustomProperty: true,
     onParseError() {
-      throw new InvalidDoc();
+      if (rejectInvalidSyntax) {
+        throw new InvalidDoc();
+      }
     },
   });
   walkCss(ast, function (node) {
@@ -330,12 +380,136 @@ function validateCss(
   });
 }
 
-function staticString(expression: Expression | undefined): string | undefined {
+function staticString(
+  expression: Expression | undefined,
+  staticStrings?: WeakMap<object, string>,
+): string | undefined {
   if (expression?.type === "Literal" && typeof expression.value === "string") {
     return expression.value;
   }
   if (expression?.type === "TemplateLiteral" && expression.expressions.length === 0) {
     return expression.quasis[0]?.value.cooked ?? undefined;
+  }
+  if (expression?.type === "Identifier") {
+    return staticStrings?.get(expression);
+  }
+  return undefined;
+}
+
+function selectedElementName(
+  selector: string,
+  elementsById: ReadonlyMap<string, string>,
+): string | undefined {
+  const elementNames = selector.split(",").map((group) => {
+    const terminal = group.trim().split(/[\s>+~]+/).at(-1) ?? "";
+    const tagName = terminal.match(/^([a-z][a-z0-9-]*)(?=$|[#.:[\]])/i)?.[1];
+    if (tagName !== undefined) {
+      return tagName.toLowerCase();
+    }
+    const id = terminal.match(/^#([^#.:[\]]+)/)?.[1];
+    return id === undefined ? undefined : elementsById.get(id);
+  });
+  const [first] = elementNames;
+  if (
+    first !== undefined &&
+    elementNames.every((elementName) => elementName === first)
+  ) {
+    return first;
+  }
+  return undefined;
+}
+
+function knownElementName(
+  expression: Expression | undefined,
+  staticStrings: WeakMap<object, string>,
+  knownElements: WeakMap<object, string>,
+  elementsById: ReadonlyMap<string, string>,
+): string | undefined {
+  if (expression?.type === "Identifier") {
+    return knownElements.get(expression);
+  }
+  if (expression?.type === "MemberExpression" && expression.object.type !== "Super") {
+    if (
+      expression.object.type === "Identifier" &&
+      expression.object.name === "document"
+    ) {
+      const name = memberName(expression);
+      if (name === "body" || name === "head") {
+        return name;
+      }
+      if (name === "documentElement") {
+        return "html";
+      }
+    }
+    const collectionName = knownElementName(
+      expression.object,
+      staticStrings,
+      knownElements,
+      elementsById,
+    );
+    if (collectionName?.endsWith("[]") && memberName(expression) === "#numeric") {
+      return collectionName.slice(0, -2);
+    }
+    return undefined;
+  }
+  if (expression?.type !== "CallExpression" || expression.callee.type !== "MemberExpression") {
+    return undefined;
+  }
+  const method = memberName(expression.callee);
+  if (method === "cloneNode" && expression.callee.object.type !== "Super") {
+    return knownElementName(
+      expression.callee.object,
+      staticStrings,
+      knownElements,
+      elementsById,
+    );
+  }
+  if (method === "createElement" || method === "createElementNS") {
+    const argument = expression.arguments[method === "createElementNS" ? 1 : 0];
+    return argument?.type === "SpreadElement"
+      ? undefined
+      : staticString(argument, staticStrings)?.toLowerCase();
+  }
+  if (method === "querySelector") {
+    const argument = expression.arguments[0];
+    const selector = argument?.type === "SpreadElement"
+      ? undefined
+      : staticString(argument, staticStrings);
+    return selector === undefined
+      ? undefined
+      : selectedElementName(selector, elementsById);
+  }
+  if (method === "querySelectorAll" || method === "getElementsByTagName") {
+    const argument = expression.arguments[0];
+    const query = argument?.type === "SpreadElement"
+      ? undefined
+      : staticString(argument, staticStrings);
+    const elementName = query === undefined
+      ? undefined
+      : method === "querySelectorAll"
+        ? selectedElementName(query, elementsById)
+        : /^[a-z][a-z0-9-]*$/i.test(query)
+          ? query.toLowerCase()
+          : undefined;
+    return elementName === undefined ? undefined : `${elementName}[]`;
+  }
+  if (method === "item" && expression.callee.object.type !== "Super") {
+    const collectionName = knownElementName(
+      expression.callee.object,
+      staticStrings,
+      knownElements,
+      elementsById,
+    );
+    return collectionName?.endsWith("[]")
+      ? collectionName.slice(0, -2)
+      : undefined;
+  }
+  if (method === "getElementById") {
+    const argument = expression.arguments[0];
+    const id = argument?.type === "SpreadElement"
+      ? undefined
+      : staticString(argument, staticStrings);
+    return id === undefined ? undefined : elementsById.get(id);
   }
   return undefined;
 }
@@ -377,13 +551,114 @@ function validateScriptMember(
   }
 }
 
-function validateScriptCall(node: Extract<ScriptNode, { type: "CallExpression" }>): void {
+function validateScriptGeneratedText(
+  elementName: string,
+  value: string,
+  elementsById: ReadonlyMap<string, string>,
+): void {
+  if (elementName === "script") {
+    validateScript(value, elementsById);
+  } else {
+    validateCss(value, "stylesheet", false);
+  }
+}
+
+function validateScriptCall(
+  node: Extract<ScriptNode, { type: "CallExpression" }>,
+  unresolvedIdentifiers: WeakSet<object>,
+  staticStrings: WeakMap<object, string>,
+  knownElements: WeakMap<object, string>,
+  elementsById: ReadonlyMap<string, string>,
+): void {
+  if (
+    node.callee.type === "Identifier" &&
+    unresolvedIdentifiers.has(node.callee) &&
+    (node.callee.name === "setInterval" || node.callee.name === "setTimeout")
+  ) {
+    const callback = node.arguments[0];
+    if (
+      callback?.type === "SpreadElement" ||
+      staticString(callback, staticStrings) !== undefined
+    ) {
+      throw new InvalidDoc();
+    }
+    return;
+  }
   if (node.callee.type !== "MemberExpression") {
     return;
   }
   const name = memberName(node.callee);
   if (name === "click" || name === "dispatchEvent") {
     throw new InvalidDoc();
+  }
+  if (
+    [
+      "after",
+      "append",
+      "appendChild",
+      "appendData",
+      "before",
+      "insertAdjacentText",
+      "insertBefore",
+      "insertData",
+      "prepend",
+      "replaceChildren",
+      "replaceData",
+      "replaceWith",
+      "replaceWholeText",
+    ].includes(name ?? "") &&
+    node.callee.object.type !== "Super"
+  ) {
+    const textArguments =
+      name === "insertAdjacentText" || name === "insertData"
+        ? node.arguments.slice(1, 2)
+        : name === "replaceData"
+          ? node.arguments.slice(2, 3)
+          : node.arguments;
+    const elementName = knownElementName(
+      node.callee.object,
+      staticStrings,
+      knownElements,
+      elementsById,
+    );
+    if (elementName === "script" || elementName === "style") {
+      for (const argument of textArguments) {
+        const value = argument.type === "SpreadElement"
+          ? undefined
+          : staticString(argument, staticStrings);
+        if (value === undefined) {
+          throw new InvalidDoc();
+        }
+        validateScriptGeneratedText(elementName, value, elementsById);
+      }
+      return;
+    }
+    if (elementName === undefined) {
+      for (const argument of textArguments) {
+        const value = argument.type === "SpreadElement"
+          ? undefined
+          : staticString(argument, staticStrings);
+        if (value === undefined) {
+          throw new InvalidDoc();
+        }
+        validateCss(value, "stylesheet", false, false);
+      }
+    }
+  }
+  if (name === "createElement" || name === "createElementNS") {
+    const nameArgument = node.arguments[name === "createElementNS" ? 1 : 0];
+    const elementName = nameArgument?.type === "SpreadElement"
+      ? undefined
+      : staticString(nameArgument, staticStrings)?.toLowerCase();
+    if (
+      elementName === undefined ||
+      elementName === "script" ||
+      elementName === "style" ||
+      forbiddenElements.has(elementName)
+    ) {
+      throw new InvalidDoc();
+    }
+    return;
   }
   if (name !== "setAttribute" && name !== "setAttributeNS" && name !== "setProperty") {
     return;
@@ -393,10 +668,10 @@ function validateScriptCall(node: Extract<ScriptNode, { type: "CallExpression" }
     const value = node.arguments[1];
     const propertyName = property?.type === "SpreadElement"
       ? undefined
-      : staticString(property);
+      : staticString(property, staticStrings);
     const propertyValue = value?.type === "SpreadElement"
       ? undefined
-      : staticString(value);
+      : staticString(value, staticStrings);
     if (propertyName === undefined || propertyValue === undefined) {
       throw new InvalidDoc();
     }
@@ -406,25 +681,34 @@ function validateScriptCall(node: Extract<ScriptNode, { type: "CallExpression" }
   const nameArgument = name === "setAttributeNS" ? node.arguments[1] : node.arguments[0];
   const valueArgument = name === "setAttributeNS" ? node.arguments[2] : node.arguments[1];
   const attributeName =
-    nameArgument?.type === "SpreadElement" ? undefined : staticString(nameArgument);
+    nameArgument?.type === "SpreadElement"
+      ? undefined
+      : staticString(nameArgument, staticStrings);
   if (attributeName === undefined) {
     throw new InvalidDoc();
   }
-  if (networkAttributeNames.has(attributeName.toLowerCase())) {
+  const normalizedAttributeName = attributeName.toLowerCase();
+  if (
+    normalizedAttributeName.startsWith("on") ||
+    networkAttributeNames.has(normalizedAttributeName)
+  ) {
     throw new InvalidDoc();
   }
-  if (attributeName === "style") {
+  if (normalizedAttributeName === "style") {
     const style = valueArgument?.type === "SpreadElement"
       ? undefined
-      : staticString(valueArgument);
+      : staticString(valueArgument, staticStrings);
     if (style === undefined) {
       throw new InvalidDoc();
     }
-    validateCss(style, "declarationList");
+    validateCss(style, "declarationList", false);
   }
 }
 
-function validateScript(script: string): void {
+function validateScript(
+  script: string,
+  elementsById: ReadonlyMap<string, string> = new Map(),
+): void {
   const ast = parseScript(script, {
     ecmaVersion: "latest",
     sourceType: "script",
@@ -436,6 +720,66 @@ function validateScript(script: string): void {
   const unresolvedIdentifiers = new WeakSet<object>(
     scopeManager.globalScope?.through.map((reference) => reference.identifier),
   );
+  const staticStrings = new WeakMap<object, string>();
+  for (const scope of scopeManager.scopes) {
+    for (const variable of scope.variables) {
+      const [definition] = variable.defs;
+      if (
+        variable.defs.length !== 1 ||
+        definition?.type !== "Variable" ||
+        (definition.parent.kind !== "const" &&
+          (definition.parent.kind !== "let" ||
+            variable.references.some(
+              (reference) => reference.isWrite() && reference.init !== true,
+            ))) ||
+        definition.node.init === null
+      ) {
+        continue;
+      }
+      const value = staticString(
+        definition.node.init as unknown as Expression,
+        staticStrings,
+      );
+      if (value === undefined) {
+        continue;
+      }
+      staticStrings.set(definition.name, value);
+      for (const reference of variable.references) {
+        staticStrings.set(reference.identifier, value);
+      }
+    }
+  }
+  const knownElements = new WeakMap<object, string>();
+  for (const scope of scopeManager.scopes) {
+    for (const variable of scope.variables) {
+      const [definition] = variable.defs;
+      if (
+        variable.defs.length !== 1 ||
+        definition?.type !== "Variable" ||
+        (definition.parent.kind !== "const" &&
+          (definition.parent.kind !== "let" ||
+            variable.references.some(
+              (reference) => reference.isWrite() && reference.init !== true,
+            ))) ||
+        definition.node.init === null
+      ) {
+        continue;
+      }
+      const elementName = knownElementName(
+        definition.node.init as unknown as Expression,
+        staticStrings,
+        knownElements,
+        elementsById,
+      );
+      if (elementName === undefined) {
+        continue;
+      }
+      knownElements.set(definition.name, elementName);
+      for (const reference of variable.references) {
+        knownElements.set(reference.identifier, elementName);
+      }
+    }
+  }
   walkScript(ast, (node, _state, ancestors) => {
     const parent = ancestors.at(-2);
     if (node.type === "ImportExpression") {
@@ -452,7 +796,13 @@ function validateScript(script: string): void {
       validateScriptMember(node, parent);
     }
     if (node.type === "CallExpression") {
-      validateScriptCall(node);
+      validateScriptCall(
+        node,
+        unresolvedIdentifiers,
+        staticStrings,
+        knownElements,
+        elementsById,
+      );
     }
     if (node.type === "NewExpression") {
       if (
@@ -471,14 +821,39 @@ function validateScript(script: string): void {
         throw new InvalidDoc();
       }
       if (
-        node.left.object.type === "MemberExpression" &&
-        memberName(node.left.object) === "style"
+        scriptedCssPropertyNames.has(name) ||
+        (node.left.object.type === "MemberExpression" &&
+          memberName(node.left.object) === "style")
       ) {
-        const value = staticString(node.right);
+        const value = staticString(node.right, staticStrings);
         if (value === undefined) {
           throw new InvalidDoc();
         }
         validateCss(`${name}:${value}`, "declarationList", false);
+      }
+      if (
+        (name === "innerText" || name === "nodeValue" || name === "textContent") &&
+        node.left.object.type !== "Super"
+      ) {
+        const elementName = knownElementName(
+          node.left.object,
+          staticStrings,
+          knownElements,
+          elementsById,
+        );
+        if (elementName === "script" || elementName === "style") {
+          const value = staticString(node.right, staticStrings);
+          if (value === undefined) {
+            throw new InvalidDoc();
+          }
+          validateScriptGeneratedText(elementName, value, elementsById);
+        } else if (elementName === undefined) {
+          const value = staticString(node.right, staticStrings);
+          if (value === undefined) {
+            throw new InvalidDoc();
+          }
+          validateCss(value, "stylesheet", false, false);
+        }
       }
     }
   });
@@ -545,27 +920,36 @@ function validateElement(element: Element): void {
 
 /** Validates the browser-visible Doc contract without rewriting submitted HTML. */
 export async function validateDocHtml(html: string): Promise<boolean> {
-  let script = "";
-  let style = "";
+  const elementsById = new Map<string, string>();
+  const scripts: string[] = [];
+  const styles: string[] = [];
   try {
     const rewritten = new HTMLRewriter()
-      .on("*", { element: validateElement })
-      .on("script", {
+      .on("*", {
         element(element) {
-          script = "";
-          element.onEndTag(() => validateScript(script));
+          validateElement(element);
+          const id = element.getAttribute("id");
+          if (id !== null && !elementsById.has(id)) {
+            elementsById.set(id, element.tagName.toLowerCase());
+          }
+        },
+      })
+      .on("script", {
+        element() {
+          scripts.push("");
         },
         text(text) {
-          script += text.text;
+          const index = scripts.length - 1;
+          scripts[index] = (scripts[index] ?? "") + text.text;
         },
       })
       .on("style", {
-        element(element) {
-          style = "";
-          element.onEndTag(() => validateCss(style, "stylesheet"));
+        element() {
+          styles.push("");
         },
         text(text) {
-          style += text.text;
+          const index = styles.length - 1;
+          styles[index] = (styles[index] ?? "") + text.text;
         },
       })
       .transform(
@@ -574,6 +958,12 @@ export async function validateDocHtml(html: string): Promise<boolean> {
         }),
       );
     await rewritten.arrayBuffer();
+    for (const style of styles) {
+      validateCss(style, "stylesheet");
+    }
+    for (const script of scripts) {
+      validateScript(script, elementsById);
+    }
     return true;
   } catch {
     return false;
