@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "drop",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-20",
+  "r2_buckets": [
+    {
+      "binding": "CONTROL_STORE",
+      "bucket_name": "drop-control"
+    },
+    {
+      "binding": "CONTENT_STORE",
+      "bucket_name": "drop-content"
+    }
+  ]
+}
