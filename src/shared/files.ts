@@ -14,6 +14,7 @@ export {
 import { retentionSchema } from "./drops.ts";
 export {
   detectFileContentType,
+  detectVideoFileSignature,
   fileContentTypeSchema,
   maxFileSize,
   type FileContentType,

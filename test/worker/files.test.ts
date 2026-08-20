@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { fileUploadResponseSchema } from "../../src/shared/files.ts";
+import {
+  fileUploadResponseSchema,
+  maxFileSize,
+} from "../../src/shared/files.ts";
 import {
   createdUploadKeySchema,
   type CreatedUploadKey,
@@ -10,6 +13,9 @@ import {
   onePixelAvif,
   onePixelJpeg,
   onePixelWebp,
+  signatureOnlyAvif,
+  signatureOnlyMp4,
+  signatureOnlyWebp,
   tinyMp4,
   tinyWebm,
 } from "../media-fixtures.ts";
@@ -18,8 +24,6 @@ import {
   testAdminKey,
   type WorkerdServer,
 } from "../workerd.ts";
-
-const maxFileSize = 95 * 1024 * 1024;
 
 interface ListedContentObject {
   readonly key: string;
@@ -201,6 +205,9 @@ describe("File creation and public reads", () => {
       corrupt(onePixelGif, onePixelGif.byteLength - 1),
       corrupt(tinyMp4, 3),
       corrupt(tinyWebm, webmDocTypeOffset),
+      signatureOnlyMp4,
+      signatureOnlyAvif,
+      signatureOnlyWebp,
     ];
 
     for (const bytes of malformed) {

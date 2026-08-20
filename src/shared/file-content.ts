@@ -2,9 +2,6 @@ import { z } from "zod";
 
 export const maxFileSize = 95 * 1024 * 1024;
 
-export const fileKindSchema = z.literal("file");
-export type FileKind = z.infer<typeof fileKindSchema>;
-
 export const fileContentTypeSchema = z.enum([
   "image/jpeg",
   "image/png",
@@ -221,21 +218,49 @@ function isWebp(bytes: Uint8Array): boolean {
     const end = payload + length;
     if (end > bytes.byteLength) return false;
     if (type === "VP8 ") {
+      const frameTag =
+        bytes[payload]! |
+        (bytes[payload + 1]! << 8) |
+        (bytes[payload + 2]! << 16);
+      const partitionLength = frameTag >>> 5;
+      const width =
+        (bytes[payload + 6]! | (bytes[payload + 7]! << 8)) & 0x3fff;
+      const height =
+        (bytes[payload + 8]! | (bytes[payload + 9]! << 8)) & 0x3fff;
       if (
         length < 10 ||
+        (frameTag & 1) !== 0 ||
+        partitionLength === 0 ||
+        partitionLength > length - 3 ||
         bytes[payload + 3] !== 0x9d ||
         bytes[payload + 4] !== 0x01 ||
-        bytes[payload + 5] !== 0x2a
+        bytes[payload + 5] !== 0x2a ||
+        width === 0 ||
+        height === 0
       ) {
         return false;
       }
       foundImage = true;
     } else if (type === "VP8L") {
-      if (length < 5 || bytes[payload] !== 0x2f) return false;
+      if (
+        length <= 5 ||
+        bytes[payload] !== 0x2f ||
+        (bytes[payload + 4]! >>> 5) !== 0
+      ) {
+        return false;
+      }
       foundImage = true;
     } else if (type === "VP8X") {
       if (length !== 10) return false;
     } else if (type === "ANMF") {
+      if (length <= 24) return false;
+      const frame = bytes.subarray(payload + 16, end);
+      const frameFile = new Uint8Array(12 + frame.byteLength);
+      frameFile.set([0x52, 0x49, 0x46, 0x46], 0);
+      new DataView(frameFile.buffer).setUint32(4, frameFile.byteLength - 8, true);
+      frameFile.set([0x57, 0x45, 0x42, 0x50], 8);
+      frameFile.set(frame, 12);
+      if (!isWebp(frameFile)) return false;
       foundImage = true;
     }
     offset = end + (length % 2);
@@ -297,37 +322,98 @@ function detectIsoContentType(bytes: Uint8Array): FileContentType | undefined {
   if (first?.type !== "ftyp") return undefined;
   const brands = isoBrands(bytes, first);
   if (brands === undefined) return undefined;
-  const types = new Set(boxes?.map(({ type }) => type));
+  const meta = boxes?.find(({ type }) => type === "meta");
+  const movie = boxes?.find(({ type }) => type === "moov");
+  const mediaData = boxes?.find(({ type }) => type === "mdat");
   if (brands.some((brand) => brand === "avif" || brand === "avis")) {
-    return types.has("meta") && types.has("mdat") ? "image/avif" : undefined;
+    if (
+      meta === undefined ||
+      mediaData === undefined ||
+      mediaData.end - mediaData.payloadStart < 4 ||
+      meta.end - meta.payloadStart <= 4
+    ) {
+      return undefined;
+    }
+    const metaBoxes = parseIsoBoxes(
+      bytes.subarray(meta.payloadStart + 4, meta.end),
+    );
+    const metaTypes = new Set(metaBoxes?.map(({ type }) => type));
+    return metaTypes.has("pitm") &&
+      metaTypes.has("iloc") &&
+      metaTypes.has("iinf") &&
+      metaTypes.has("iprp")
+      ? "image/avif"
+      : undefined;
   }
-  const mp4Brands = new Set([
-    "isom",
-    "iso2",
-    "iso3",
-    "iso4",
-    "iso5",
-    "iso6",
-    "iso7",
-    "iso8",
-    "iso9",
-    "mp41",
-    "mp42",
-    "avc1",
-    "dash",
-    "M4V ",
-  ]);
   return brands.some((brand) => mp4Brands.has(brand)) &&
-    types.has("moov") &&
-    types.has("mdat")
+    movie !== undefined &&
+    mediaData !== undefined &&
+    mediaData.end > mediaData.payloadStart &&
+    containsVideoTrack(bytes.subarray(movie.payloadStart, movie.end))
     ? "video/mp4"
     : undefined;
+}
+
+const mp4Brands = new Set([
+  "isom",
+  "iso2",
+  "iso3",
+  "iso4",
+  "iso5",
+  "iso6",
+  "iso7",
+  "iso8",
+  "iso9",
+  "mp41",
+  "mp42",
+  "avc1",
+  "dash",
+  "M4V ",
+]);
+
+function containsVideoTrack(movie: Uint8Array): boolean {
+  const tracks = parseIsoBoxes(movie)?.filter(({ type }) => type === "trak");
+  return (
+    tracks?.some((track) => {
+      const trackBytes = movie.subarray(track.payloadStart, track.end);
+      const media = parseIsoBoxes(trackBytes)?.find(
+        ({ type }) => type === "mdia",
+      );
+      if (media === undefined) return false;
+      const mediaBytes = trackBytes.subarray(media.payloadStart, media.end);
+      const handler = parseIsoBoxes(mediaBytes)?.find(
+        ({ type }) => type === "hdlr",
+      );
+      return (
+        handler !== undefined &&
+        handler.end - handler.payloadStart >= 12 &&
+        ascii(mediaBytes, handler.payloadStart + 8, 4) === "vide"
+      );
+    }) ?? false
+  );
+}
+
+function mp4Signature(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 16 || ascii(bytes, 4, 4) !== "ftyp") return false;
+  const size = readUint32BigEndian(bytes, 0);
+  if (size < 16 || size > bytes.byteLength || size % 4 !== 0) return false;
+  const brands = isoBrands(bytes, {
+    type: "ftyp",
+    payloadStart: 8,
+    end: size,
+  });
+  return brands?.some((brand) => mp4Brands.has(brand)) ?? false;
 }
 
 interface EbmlInteger {
   readonly length: number;
   readonly unknown: boolean;
   readonly value: number;
+}
+
+interface WebmSegment {
+  readonly payloadStart: number;
+  readonly size: EbmlInteger;
 }
 
 function readEbmlInteger(
@@ -353,24 +439,24 @@ function readEbmlInteger(
   return Number.isSafeInteger(value) ? { length, unknown, value } : undefined;
 }
 
-function isWebm(bytes: Uint8Array): boolean {
+function readWebmSegment(bytes: Uint8Array): WebmSegment | undefined {
   const headerId = readEbmlInteger(bytes, 0, true);
-  if (headerId?.value !== 0x1a45dfa3) return false;
+  if (headerId?.value !== 0x1a45dfa3) return undefined;
   const headerSize = readEbmlInteger(bytes, headerId.length, false);
-  if (headerSize === undefined || headerSize.unknown) return false;
+  if (headerSize === undefined || headerSize.unknown) return undefined;
   let offset = headerId.length + headerSize.length;
   const headerEnd = offset + headerSize.value;
-  if (headerEnd > bytes.byteLength) return false;
+  if (headerEnd > bytes.byteLength) return undefined;
   let webmDocument = false;
   while (offset < headerEnd) {
     const id = readEbmlInteger(bytes, offset, true);
-    if (id === undefined) return false;
+    if (id === undefined) return undefined;
     offset += id.length;
     const size = readEbmlInteger(bytes, offset, false);
-    if (size === undefined || size.unknown) return false;
+    if (size === undefined || size.unknown) return undefined;
     offset += size.length;
     const end = offset + size.value;
-    if (end > headerEnd) return false;
+    if (end > headerEnd) return undefined;
     if (
       id.value === 0x4282 &&
       size.value === 4 &&
@@ -381,13 +467,22 @@ function isWebm(bytes: Uint8Array): boolean {
     offset = end;
   }
   const segmentId = readEbmlInteger(bytes, headerEnd, true);
-  if (!webmDocument || segmentId?.value !== 0x18538067) return false;
+  if (!webmDocument || segmentId?.value !== 0x18538067) return undefined;
   const segmentSize = readEbmlInteger(bytes, headerEnd + segmentId.length, false);
-  if (segmentSize === undefined) return false;
-  let segmentOffset = headerEnd + segmentId.length + segmentSize.length;
-  const segmentEnd = segmentSize.unknown
+  if (segmentSize === undefined) return undefined;
+  return {
+    payloadStart: headerEnd + segmentId.length + segmentSize.length,
+    size: segmentSize,
+  };
+}
+
+function isWebm(bytes: Uint8Array): boolean {
+  const segment = readWebmSegment(bytes);
+  if (segment === undefined) return false;
+  let segmentOffset = segment.payloadStart;
+  const segmentEnd = segment.size.unknown
     ? bytes.byteLength
-    : segmentOffset + segmentSize.value;
+    : segmentOffset + segment.size.value;
   if (segmentOffset >= segmentEnd || segmentEnd !== bytes.byteLength) return false;
 
   let foundTracks = false;
@@ -406,6 +501,14 @@ function isWebm(bytes: Uint8Array): boolean {
     segmentOffset = end;
   }
   return foundTracks && foundCluster;
+}
+
+export function detectVideoFileSignature(
+  bytes: Uint8Array,
+): "video/mp4" | "video/webm" | undefined {
+  if (mp4Signature(bytes)) return "video/mp4";
+  if (readWebmSegment(bytes) !== undefined) return "video/webm";
+  return undefined;
 }
 
 export function detectFileContentType(

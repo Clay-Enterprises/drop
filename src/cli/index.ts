@@ -32,6 +32,7 @@ import {
 } from "../shared/drops.ts";
 import {
   detectFileContentType,
+  detectVideoFileSignature,
   fileUploadResponseSchema,
   maxFileSize,
   type FileUploadResponse,
@@ -439,7 +440,7 @@ function dropKindForPath(path: string): DropKind {
 
 function oversizedFileError(size: number): CliError {
   return new CliError(
-    `The resulting File is ${(size / (1024 * 1024)).toFixed(1)} MiB; Files must not exceed 95 MiB.`,
+    `The resulting File is ${size} bytes (${(size / (1024 * 1024)).toFixed(2)} MiB), above the 95 MiB limit. Compress it more aggressively and try again.`,
     1,
   );
 }
@@ -534,20 +535,28 @@ async function processVideo(absolutePath: string): Promise<PreparedFile> {
 
 async function prepareFile(
   absolutePath: string,
-  file: Blob,
+  file: Bun.BunFile,
   raw: boolean,
 ): Promise<PreparedFile> {
-  checkFileSize(file);
-  const contentType = detectFileContentType(
-    new Uint8Array(await file.arrayBuffer()),
-  );
-  const video = contentType === "video/mp4" || contentType === "video/webm";
-  if (raw && !video) {
-    throw new CliError("--raw accepts only valid MP4 or WebM Files.", 1);
+  if (raw) {
+    checkFileSize(file);
+    const contentType = detectFileContentType(
+      new Uint8Array(await file.arrayBuffer()),
+    );
+    if (contentType !== "video/mp4" && contentType !== "video/webm") {
+      throw new CliError("--raw accepts only valid MP4 or WebM Files.", 1);
+    }
+    return { body: file, cleanup: async () => undefined };
   }
-  return video && !raw
-    ? processVideo(absolutePath)
-    : { body: file, cleanup: async () => undefined };
+
+  const prefix = new Uint8Array(
+    await file.slice(0, 4 * 1024).arrayBuffer(),
+  );
+  if (detectVideoFileSignature(prefix) !== undefined) {
+    return processVideo(absolutePath);
+  }
+  checkFileSize(file);
+  return { body: file, cleanup: async () => undefined };
 }
 
 async function uploadDrop(
