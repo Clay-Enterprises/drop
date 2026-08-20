@@ -17,14 +17,21 @@ import { z } from "zod";
 
 import { errorResponseSchema } from "../shared/errors.ts";
 import {
-  fileUploadResponseSchema,
+  docUploadResponseSchema,
+  type DocUploadResponse,
+} from "../shared/docs.ts";
+import {
+  type DropKind,
   localBindingSchema,
   opaqueIdSchema,
   retentionSchema,
-  type FileUploadResponse,
   type LocalBinding,
   type LocalBindingContent,
   type Retention,
+} from "../shared/drops.ts";
+import {
+  fileUploadResponseSchema,
+  type FileUploadResponse,
 } from "../shared/files.ts";
 import type {
   CreatedUploadKey,
@@ -57,6 +64,8 @@ class CliError extends Error {
     super(message);
   }
 }
+
+type DropUploadResponse = DocUploadResponse | FileUploadResponse;
 
 function readApiEnvironment(): z.infer<typeof apiEnvironmentSchema> {
   const environment = apiEnvironmentSchema.safeParse(Bun.env);
@@ -237,7 +246,7 @@ async function sha256Hex(value: string): Promise<string> {
 
 async function writeLocalBinding(
   absolutePath: string,
-  response: FileUploadResponse,
+  response: DropUploadResponse,
 ): Promise<void> {
   const content: LocalBindingContent = {
     path: absolutePath,
@@ -296,7 +305,7 @@ async function readLocalBinding(
     const binding = localBindingSchema.parse(JSON.parse(contents));
     const url = new URL(binding.url);
     const opaqueId = opaqueIdSchema.safeParse(
-      /^\/files\/([^/]+)$/.exec(url.pathname)?.[1],
+      new RegExp(`^/${binding.kind}s/([^/]+)$`).exec(url.pathname)?.[1],
     );
     const checksum = await bindingChecksum(binding);
     if (
@@ -347,14 +356,17 @@ async function readLocalBindingByUrl(
 
 function replacementApiPath(binding: LocalBinding): string {
   const opaqueId = opaqueIdSchema.parse(
-    /^\/files\/([^/]+)$/.exec(new URL(binding.url).pathname)?.[1],
+    new RegExp(`^/${binding.kind}s/([^/]+)$`).exec(
+      new URL(binding.url).pathname,
+    )?.[1],
   );
-  return `/api/files/${opaqueId}`;
+  return `/api/${binding.kind}s/${opaqueId}`;
 }
 
-async function sendFile(
+async function sendDrop(
   absolutePath: string,
   file: Blob,
+  kind: DropKind,
   uploadKey: string,
   environment: z.infer<typeof apiEnvironmentSchema>,
   binding: LocalBinding | undefined,
@@ -373,7 +385,7 @@ async function sendFile(
 
   const response = await fetch(
     new URL(
-      binding === undefined ? "/api/files" : replacementApiPath(binding),
+      binding === undefined ? `/api/${kind}s` : replacementApiPath(binding),
       environment.DROP_API_URL,
     ),
     {
@@ -396,9 +408,10 @@ async function sendFile(
         1,
       );
     }
-    return sendFile(
+    return sendDrop(
       absolutePath,
       file,
+      kind,
       uploadKey,
       environment,
       undefined,
@@ -408,23 +421,30 @@ async function sendFile(
   return response;
 }
 
-async function uploadFile(
+function dropKindForPath(path: string): DropKind {
+  return path.toLowerCase().endsWith(".html") ? "doc" : "file";
+}
+
+async function uploadDrop(
   pathInput: string,
   retention: Retention | undefined,
-): Promise<FileUploadResponse> {
+): Promise<DropUploadResponse> {
   const resolvedPath = resolve(pathInput);
+  const kind = dropKindForPath(resolvedPath);
   const file = Bun.file(resolvedPath);
   if (!(await file.exists())) {
-    throw new CliError(`The File does not exist: ${resolvedPath}`, 1);
+    const label = kind === "doc" ? "Doc" : "File";
+    throw new CliError(`The ${label} does not exist: ${resolvedPath}`, 1);
   }
 
   const absolutePath = await realpath(resolvedPath);
   const binding = await readLocalBinding(absolutePath);
   const uploadKey = await resolveUploadKey();
   const environment = readApiEnvironment();
-  const response = await sendFile(
+  const response = await sendDrop(
     absolutePath,
     file,
+    kind,
     uploadKey,
     environment,
     binding,
@@ -434,15 +454,19 @@ async function uploadFile(
     throw await responseError(response);
   }
 
-  const created = fileUploadResponseSchema.parse(await response.json());
+  const responseBody: unknown = await response.json();
+  const created =
+    kind === "doc"
+      ? docUploadResponseSchema.parse(responseBody)
+      : fileUploadResponseSchema.parse(responseBody);
   await writeLocalBinding(absolutePath, created);
   return created;
 }
 
-async function changeFileRetention(
+async function changeDropRetention(
   pathOrUrl: string,
   retention: Retention,
-): Promise<FileUploadResponse> {
+): Promise<DropUploadResponse> {
   const environment = readApiEnvironment();
   const apiOrigin = new URL(environment.DROP_API_URL).origin;
   const submittedUrl = z.url().safeParse(pathOrUrl);
@@ -450,9 +474,8 @@ async function changeFileRetention(
   let binding: LocalBinding | undefined;
   if (submittedUrl.success) {
     const url = new URL(submittedUrl.data);
-    const opaqueId = opaqueIdSchema.safeParse(
-      /^\/files\/([^/]+)$/.exec(url.pathname)?.[1],
-    );
+    const match = /^\/(files|docs)\/([^/]+)$/.exec(url.pathname);
+    const opaqueId = opaqueIdSchema.safeParse(match?.[2]);
     if (
       url.origin !== apiOrigin ||
       url.search !== "" ||
@@ -460,7 +483,7 @@ async function changeFileRetention(
       !opaqueId.success
     ) {
       throw new CliError(
-        `The value is not an exact File Unlisted URL: ${pathOrUrl}`,
+        `The value is not an exact File or Doc Unlisted URL: ${pathOrUrl}`,
         2,
       );
     }
@@ -476,7 +499,8 @@ async function changeFileRetention(
     const resolvedPath = resolve(pathOrUrl);
     const file = Bun.file(resolvedPath);
     if (!(await file.exists())) {
-      throw new CliError(`The File does not exist: ${resolvedPath}`, 1);
+      const label = dropKindForPath(resolvedPath) === "doc" ? "Doc" : "File";
+      throw new CliError(`The ${label} does not exist: ${resolvedPath}`, 1);
     }
     absolutePath = await realpath(resolvedPath);
     binding = await readLocalBinding(absolutePath);
@@ -513,7 +537,11 @@ async function changeFileRetention(
     throw await responseError(response);
   }
 
-  const changed = fileUploadResponseSchema.parse(await response.json());
+  const responseBody: unknown = await response.json();
+  const changed =
+    binding.kind === "doc"
+      ? docUploadResponseSchema.parse(responseBody)
+      : fileUploadResponseSchema.parse(responseBody);
   await writeLocalBinding(absolutePath, changed);
   return changed;
 }
@@ -624,7 +652,7 @@ async function main(arguments_: string[]): Promise<number> {
         2,
       );
     }
-    const changed = await changeFileRetention(
+    const changed = await changeDropRetention(
       arguments_[1],
       retention.data,
     );
@@ -638,7 +666,7 @@ async function main(arguments_: string[]): Promise<number> {
 
   const uploadCommand = parseUploadCommand(arguments_);
   if (uploadCommand !== undefined) {
-    const created = await uploadFile(
+    const created = await uploadDrop(
       uploadCommand.path,
       uploadCommand.retention,
     );

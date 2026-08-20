@@ -10,6 +10,15 @@ import {
 } from "../shared/files.ts";
 import { credentialIdSchema } from "../shared/upload-keys.ts";
 import {
+  changeDocRetention,
+  createDoc,
+  docContentType,
+  maxDocSize,
+  replaceDoc,
+  serveDoc,
+  validateDocHtml,
+} from "./docs.ts";
+import {
   changeFileRetention,
   createFile,
   detectFileContentType,
@@ -173,6 +182,84 @@ async function readFileUploadRequest(
       };
 }
 
+async function readDocUploadRequest(
+  request: Request,
+): Promise<
+  | { readonly status: "error"; readonly response: Response }
+  | {
+      readonly status: "ok";
+      readonly input: { readonly body: Blob; readonly originalFilename: string };
+    }
+> {
+  const originalFilename = parseOriginalFilename(
+    request.headers.get("Content-Disposition") ?? undefined,
+  );
+  if (originalFilename === undefined) {
+    return {
+      status: "error",
+      response: jsonError(
+        "invalid_request",
+        "Content-Disposition must contain an original filename.",
+        400,
+      ),
+    };
+  }
+
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null && Number(declaredLength) > maxDocSize) {
+    await request.body?.cancel();
+    return {
+      status: "error",
+      response: jsonError(
+        "payload_too_large",
+        "Docs must not exceed 512 KiB.",
+        413,
+      ),
+    };
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > maxDocSize) {
+    return {
+      status: "error",
+      response: jsonError(
+        "payload_too_large",
+        "Docs must not exceed 512 KiB.",
+        413,
+      ),
+    };
+  }
+  let html: string;
+  try {
+    html = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: false,
+    }).decode(bytes);
+  } catch {
+    return {
+      status: "error",
+      response: jsonError(
+        "invalid_doc",
+        "The submitted Doc violates the HTML communication contract.",
+        422,
+      ),
+    };
+  }
+  if (!(await validateDocHtml(html))) {
+    return {
+      status: "error",
+      response: jsonError(
+        "invalid_doc",
+        "The submitted Doc violates the HTML communication contract.",
+        422,
+      ),
+    };
+  }
+  return {
+    status: "ok",
+    input: { body: new Blob([bytes], { type: docContentType }), originalFilename },
+  };
+}
+
 function bearerCredential(authorization: string | undefined): string {
   return authorization?.startsWith("Bearer ")
     ? authorization.slice("Bearer ".length)
@@ -267,6 +354,209 @@ app.post("/api/files", async (context) => {
 
   context.header("Location", created.url);
   return context.json(created, 201);
+});
+
+app.post("/api/docs", async (context) => {
+  const credentialId = await authenticateUploadKey(
+    context.env.CONTROL_STORE,
+    bearerCredential(context.req.header("Authorization")),
+  );
+  if (credentialId === undefined) {
+    return context.json(invalidCredential, 401);
+  }
+
+  const retention = readRetentionHeader(context.req.raw);
+  if (retention.status === "error") {
+    return retention.response;
+  }
+  const upload = await readDocUploadRequest(context.req.raw);
+  if (upload.status === "error") {
+    return upload.response;
+  }
+
+  const created = await createDoc(context.env.CONTENT_STORE, {
+    body: upload.input.body,
+    credentialId,
+    originalFilename: upload.input.originalFilename,
+    publicOrigin: new URL(context.req.url).origin,
+    retention: retention.retention ?? "keep",
+  });
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId,
+      url: created.url,
+      kind: created.kind,
+      size: created.size,
+      retention: created.retention,
+      outcome: "created",
+      status: 201,
+    }),
+  );
+  context.header("Location", created.url);
+  return context.json(created, 201);
+});
+
+app.put("/api/docs/:opaqueId", async (context) => {
+  const credentialId = await authenticateUploadKey(
+    context.env.CONTROL_STORE,
+    bearerCredential(context.req.header("Authorization")),
+  );
+  if (credentialId === undefined) {
+    return context.json(invalidCredential, 401);
+  }
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  const observedEtag = context.req.header("If-Match");
+  if (observedEtag === undefined) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "If-Match is required to Re-drop a Doc.",
+        },
+      },
+      400,
+    );
+  }
+  const retention = readRetentionHeader(context.req.raw);
+  if (retention.status === "error") {
+    return retention.response;
+  }
+  const upload = await readDocUploadRequest(context.req.raw);
+  if (upload.status === "error") {
+    return upload.response;
+  }
+  const result = await replaceDoc(context.env.CONTENT_STORE, {
+    body: upload.input.body,
+    credentialId,
+    observedEtag,
+    opaqueId: opaqueId.data,
+    originalFilename: upload.input.originalFilename,
+    publicOrigin: new URL(context.req.url).origin,
+    retention: retention.retention,
+  });
+  if (result.status === "missing") {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  if (result.status === "forbidden") {
+    return context.json(
+      {
+        error: {
+          code: "wrong_owner",
+          message: "This Upload Key did not create the Doc.",
+        },
+      },
+      403,
+    );
+  }
+  if (result.status === "stale") {
+    return context.json(staleDrop, 409);
+  }
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId,
+      url: result.response.url,
+      kind: result.response.kind,
+      size: result.response.size,
+      retention: result.response.retention,
+      outcome: "replaced",
+      status: 200,
+    }),
+  );
+  return context.json(result.response);
+});
+
+app.patch("/api/docs/:opaqueId", async (context) => {
+  const credentialId = await authenticateUploadKey(
+    context.env.CONTROL_STORE,
+    bearerCredential(context.req.header("Authorization")),
+  );
+  if (credentialId === undefined) {
+    return context.json(invalidCredential, 401);
+  }
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  const observedEtag = context.req.header("If-Match");
+  if (observedEtag === undefined) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "If-Match is required to change Doc retention.",
+        },
+      },
+      400,
+    );
+  }
+  const input = retentionUpdateRequestSchema.safeParse(
+    await context.req.json().catch(() => undefined),
+  );
+  if (!input.success) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "The request must contain a valid Retention Class.",
+        },
+      },
+      400,
+    );
+  }
+  const result = await changeDocRetention(context.env.CONTENT_STORE, {
+    credentialId,
+    observedEtag,
+    opaqueId: opaqueId.data,
+    publicOrigin: new URL(context.req.url).origin,
+    retention: input.data.retention,
+  });
+  if (result.status === "missing") {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  if (result.status === "forbidden") {
+    return context.json(
+      {
+        error: {
+          code: "wrong_owner",
+          message: "This Upload Key did not create the Doc.",
+        },
+      },
+      403,
+    );
+  }
+  if (result.status === "stale") {
+    return context.json(staleDrop, 409);
+  }
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId,
+      url: result.response.url,
+      kind: result.response.kind,
+      size: result.response.size,
+      retention: result.response.retention,
+      outcome: "retention_changed",
+      status: 200,
+    }),
+  );
+  return context.json(result.response);
 });
 
 app.put("/api/files/:opaqueId", async (context) => {
@@ -461,6 +751,19 @@ app.on(["GET", "HEAD"], "/files/:opaqueId", async (context) => {
   }
 
   return serveFile(
+    context.env.CONTENT_STORE,
+    opaqueId.data,
+    context.req.method as "GET" | "HEAD",
+    context.req.raw.headers,
+  );
+});
+
+app.on(["GET", "HEAD"], "/docs/:opaqueId", async (context) => {
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.body(null, 404);
+  }
+  return serveDoc(
     context.env.CONTENT_STORE,
     opaqueId.data,
     context.req.method as "GET" | "HEAD",

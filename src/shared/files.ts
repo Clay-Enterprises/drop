@@ -1,5 +1,18 @@
 import { z } from "zod";
 
+export {
+  localBindingContentSchema,
+  localBindingSchema,
+  opaqueIdSchema,
+  retentionSchema,
+  retentionUpdateRequestSchema,
+  type LocalBinding,
+  type LocalBindingContent,
+  type OpaqueId,
+  type Retention,
+} from "./drops.ts";
+import { retentionSchema } from "./drops.ts";
+
 export const fileKindSchema = z.literal("file");
 export type FileKind = z.infer<typeof fileKindSchema>;
 
@@ -8,19 +21,6 @@ export const fileContentTypeSchema = z.enum([
   "image/gif",
 ]);
 export type FileContentType = z.infer<typeof fileContentTypeSchema>;
-
-export const retentionSchema = z.enum(["7d", "30d", "90d", "keep"]);
-export type Retention = z.infer<typeof retentionSchema>;
-
-export const retentionUpdateRequestSchema = z
-  .object({ retention: retentionSchema })
-  .strict();
-
-export const opaqueIdSchema = z
-  .string()
-  .regex(/^[A-Za-z0-9_-]{32}$/)
-  .brand<"OpaqueId">();
-export type OpaqueId = z.infer<typeof opaqueIdSchema>;
 
 export const fileUploadResponseSchema = z
   .object({
@@ -35,29 +35,3 @@ export const fileUploadResponseSchema = z
   .strict();
 
 export type FileUploadResponse = z.infer<typeof fileUploadResponseSchema>;
-
-export const localBindingContentSchema = z
-  .object({
-    path: z.string(),
-    url: z.url(),
-    kind: fileKindSchema,
-    etag: z.string().regex(/^"[^"]+"$/),
-    retention: retentionSchema,
-  })
-  .strict();
-
-export type LocalBindingContent = z.infer<typeof localBindingContentSchema>;
-
-const checksummedLocalBindingSchema = localBindingContentSchema
-  .extend({
-    checksum: z.string().regex(/^[0-9a-f]{64}$/),
-    formatVersion: z.literal(1),
-  })
-  .strict();
-
-export const localBindingSchema = z.union([
-  checksummedLocalBindingSchema,
-  localBindingContentSchema,
-]);
-
-export type LocalBinding = z.infer<typeof localBindingSchema>;

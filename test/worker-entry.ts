@@ -105,6 +105,23 @@ app.patch("/__test/content-objects/:opaqueId/expiry", async (context) => {
   return context.body(null, 204);
 });
 
+app.patch("/__test/doc-objects/:opaqueId/expiry", async (context) => {
+  const key = `docs/${context.req.param("opaqueId")}`;
+  const current = await context.env.CONTENT_STORE.get(key);
+  if (current === null) {
+    return context.body(null, 404);
+  }
+  const input = (await context.req.json()) as { expiresAt: string };
+  await context.env.CONTENT_STORE.put(key, current.body, {
+    httpMetadata: current.httpMetadata,
+    customMetadata: {
+      ...current.customMetadata,
+      expiresAt: input.expiresAt,
+    },
+  });
+  return context.body(null, 204);
+});
+
 app.post("/__test/expiry-race", async (context) => {
   const input = (await context.req.json()) as {
     opaqueId: string;
