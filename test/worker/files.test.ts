@@ -10,6 +10,7 @@ import {
 } from "../../src/shared/upload-keys.ts";
 import { onePixelGif, onePixelPng } from "../fixtures.ts";
 import {
+  fragmentedMp4,
   onePixelAvif,
   onePixelJpeg,
   onePixelWebp,
@@ -158,6 +159,22 @@ describe("File creation and public reads", () => {
         new Uint8Array(bytes),
       );
     }
+  });
+
+  test("recognizes a valid fragmented MP4", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const response = await fetch(`${workerd.url}/api/files`, {
+      body: fragmentedMp4,
+      headers: uploadHeaders(uploadKey.key),
+      method: "POST",
+    });
+
+    expect(response.status).toBe(201);
+    const created = fileUploadResponseSchema.parse(await response.json());
+    expect(created).toMatchObject({
+      contentType: "video/mp4",
+      size: fragmentedMp4.byteLength,
+    });
   });
 
   test("rejects truncated supported formats with the stable media error", async () => {

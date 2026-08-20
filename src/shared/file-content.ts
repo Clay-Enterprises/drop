@@ -366,14 +366,27 @@ function detectIsoContentType(bytes: Uint8Array): FileContentType | undefined {
       ? "image/avif"
       : undefined;
   }
+  const movieBytes =
+    movie === undefined
+      ? undefined
+      : bytes.subarray(movie.payloadStart, movie.end);
+  const fragmented =
+    movieBytes !== undefined &&
+    parseIsoBoxes(movieBytes)?.some(({ type }) => type === "mvex") === true &&
+    boxes?.some(
+      (box) =>
+        box.type === "moof" &&
+        validMovieFragment(bytes.subarray(box.payloadStart, box.end)),
+    ) === true;
   return brands.some((brand) => mp4Brands.has(brand)) &&
     movie !== undefined &&
+    movieBytes !== undefined &&
     mediaData !== undefined &&
     mediaData.end - mediaData.payloadStart > 8 &&
     bytes
       .subarray(mediaData.payloadStart, mediaData.end)
       .some((byte) => byte !== 0) &&
-    containsVideoTrack(bytes.subarray(movie.payloadStart, movie.end))
+    containsVideoTrack(movieBytes, fragmented)
     ? "video/mp4"
     : undefined;
 }
@@ -479,7 +492,7 @@ function validAvifMetadata(
   );
 }
 
-function containsVideoTrack(movie: Uint8Array): boolean {
+function containsVideoTrack(movie: Uint8Array, fragmented: boolean): boolean {
   const tracks = parseIsoBoxes(movie)?.filter(({ type }) => type === "trak");
   return (
     tracks?.some((track) => {
@@ -556,10 +569,27 @@ function containsVideoTrack(movie: Uint8Array): boolean {
       );
       return (
         validDescription &&
-        fullBoxCount(sampleTableBytes, timing, 4) > 0 &&
-        fullBoxCount(sampleTableBytes, chunks, 4) > 0 &&
-        fullBoxCount(sampleTableBytes, sizes, 8) > 0 &&
-        fullBoxCount(sampleTableBytes, offsets, 4) > 0
+        (fragmented ||
+          (fullBoxCount(sampleTableBytes, timing, 4) > 0 &&
+            fullBoxCount(sampleTableBytes, chunks, 4) > 0 &&
+            fullBoxCount(sampleTableBytes, sizes, 8) > 0 &&
+            fullBoxCount(sampleTableBytes, offsets, 4) > 0))
+      );
+    }) ?? false
+  );
+}
+
+function validMovieFragment(fragment: Uint8Array): boolean {
+  const tracks = parseIsoBoxes(fragment)?.filter(({ type }) => type === "traf");
+  return (
+    tracks?.some((track) => {
+      const trackBytes = fragment.subarray(track.payloadStart, track.end);
+      const boxes = parseIsoBoxes(trackBytes);
+      const header = boxes?.find(({ type }) => type === "tfhd");
+      const run = boxes?.find(({ type }) => type === "trun");
+      return (
+        fullBoxCount(trackBytes, header, 4) > 0 &&
+        fullBoxCount(trackBytes, run, 4) > 0
       );
     }) ?? false
   );

@@ -19,6 +19,7 @@ import ffmpegPath from "ffmpeg-static";
 
 import { onePixelGif, onePixelPng } from "../fixtures.ts";
 import {
+  fragmentedMp4,
   onePixelAvif,
   onePixelJpeg,
   structuredOnlyMp4,
@@ -342,6 +343,24 @@ describe("drop File", () => {
     expect(new Uint8Array(await (await fetch(created.url)).arrayBuffer())).toEqual(
       new Uint8Array(tinyMp4),
     );
+  });
+
+  test("uploads valid fragmented MP4 bytes unchanged with --raw", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "fragmented.mp4");
+    await writeFile(path, fragmentedMp4);
+    const uploadKey = await createUploadKey(workerd);
+
+    const result = await runCli(workerd, [path, "--raw", "--json"], {
+      cwd: directory,
+      environment: { DROP_UPLOAD_KEY: uploadKey.key },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const created = JSON.parse(result.stdout) as { url: string };
+    expect(
+      new Uint8Array(await (await fetch(created.url)).arrayBuffer()),
+    ).toEqual(new Uint8Array(fragmentedMp4));
   });
 
   test("rejects --raw for non-video Files before upload", async () => {
