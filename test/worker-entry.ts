@@ -30,6 +30,22 @@ app.get("/__test/authenticate-upload-key", async (context) => {
   return context.json({ credentialId });
 });
 
+app.get("/__test/content-objects", async (context) => {
+  const page = await context.env.CONTENT_STORE.list({
+    prefix: "files/",
+    include: ["httpMetadata", "customMetadata"],
+  });
+  return context.json({
+    objects: page.objects.map((object) => ({
+      key: object.key,
+      size: object.size,
+      etag: object.httpEtag,
+      httpMetadata: object.httpMetadata,
+      customMetadata: object.customMetadata,
+    })),
+  });
+});
+
 app.route("/", dropWorker);
 
 export default app;
