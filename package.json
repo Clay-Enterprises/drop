@@ -13,12 +13,16 @@
     "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.bun.json"
   },
   "dependencies": {
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5",
+    "css-tree": "^3.2.1",
     "hono": "^4.13.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260820.1",
     "@types/bun": "^1.4.0",
+    "@types/css-tree": "^3.2.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.125.0"
   }

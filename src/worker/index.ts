@@ -205,9 +205,8 @@ async function readDocUploadRequest(
     };
   }
 
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength !== null && Number(declaredLength) > maxDocSize) {
-    await request.body?.cancel();
+  const upload = await readUploadBody(request, maxDocSize);
+  if (upload.status === "too_large") {
     return {
       status: "error",
       response: jsonError(
@@ -217,17 +216,7 @@ async function readDocUploadRequest(
       ),
     };
   }
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > maxDocSize) {
-    return {
-      status: "error",
-      response: jsonError(
-        "payload_too_large",
-        "Docs must not exceed 512 KiB.",
-        413,
-      ),
-    };
-  }
+  const bytes = new Uint8Array(await upload.body.arrayBuffer());
   let html: string;
   try {
     html = new TextDecoder("utf-8", {

@@ -67,6 +67,15 @@ class CliError extends Error {
 
 type DropUploadResponse = DocUploadResponse | FileUploadResponse;
 
+function parseDropUploadResponse(
+  kind: DropKind,
+  value: unknown,
+): DropUploadResponse {
+  return kind === "doc"
+    ? docUploadResponseSchema.parse(value)
+    : fileUploadResponseSchema.parse(value);
+}
+
 function readApiEnvironment(): z.infer<typeof apiEnvironmentSchema> {
   const environment = apiEnvironmentSchema.safeParse(Bun.env);
   if (!environment.success) {
@@ -454,11 +463,7 @@ async function uploadDrop(
     throw await responseError(response);
   }
 
-  const responseBody: unknown = await response.json();
-  const created =
-    kind === "doc"
-      ? docUploadResponseSchema.parse(responseBody)
-      : fileUploadResponseSchema.parse(responseBody);
+  const created = parseDropUploadResponse(kind, await response.json());
   await writeLocalBinding(absolutePath, created);
   return created;
 }
@@ -537,11 +542,10 @@ async function changeDropRetention(
     throw await responseError(response);
   }
 
-  const responseBody: unknown = await response.json();
-  const changed =
-    binding.kind === "doc"
-      ? docUploadResponseSchema.parse(responseBody)
-      : fileUploadResponseSchema.parse(responseBody);
+  const changed = parseDropUploadResponse(
+    binding.kind,
+    await response.json(),
+  );
   await writeLocalBinding(absolutePath, changed);
   return changed;
 }

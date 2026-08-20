@@ -1,22 +1,36 @@
 import {
-  credentialIdSchema,
-  type CredentialId,
-} from "../shared/upload-keys.ts";
+  parse as parseScript,
+  type AnyNode as ScriptNode,
+  type Expression,
+  type MemberExpression,
+} from "acorn";
+import { full as walkScript } from "acorn-walk";
+import { parse as parseCss, walk as walkCss } from "css-tree";
+
 import {
+  docContentTypeSchema,
   type DocUploadResponse,
   type DocContentType,
 } from "../shared/docs.ts";
 import {
-  opaqueIdSchema,
   type OpaqueId,
   type Retention,
-} from "../shared/files.ts";
-import { matchesEtag, parseByteRange } from "./files.ts";
+} from "../shared/drops.ts";
+import type { CredentialId } from "../shared/upload-keys.ts";
+import {
+  changeDropRetention,
+  createDrop,
+  replaceDrop,
+  serveDrop,
+  type ChangeDropRetentionResult,
+  type DropDescriptor,
+  type ReplaceDropResult,
+} from "./drop-content.ts";
 
 export const maxDocSize = 512 * 1024;
 export const docContentType: DocContentType = "text/html; charset=utf-8";
 export const docContentSecurityPolicy =
-  "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts";
+  "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox";
 
 const forbiddenElements = new Set([
   "applet",
@@ -36,32 +50,133 @@ const mediaUrlAttributes = new Set([
   "xlink:href",
 ]);
 
-const forbiddenScriptCapabilities = [
-  /\b(?:localStorage|sessionStorage|indexedDB|cookieStore|caches)\b/,
-  /\bdocument\s*\.\s*cookie\b/,
-  /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|WebTransport|RTCPeerConnection)\b/,
-  /\bnavigator\s*\.\s*(?:sendBeacon|serviceWorker)\b/,
-  /\b(?:Worker|SharedWorker)\s*\(/,
-  /\b(?:window|globalThis|self)\s*\.\s*open\s*\(/,
-  /(?:^|[^.\w])open\s*\(/,
-  /\b(?:eval|Function)\s*\(/,
-  /\bimport\s*\(/,
-] as const;
+const forbiddenScriptIdentifiers = new Set([
+  "Audio",
+  "CacheStorage",
+  "CSSStyleSheet",
+  "DOMParser",
+  "EventSource",
+  "Function",
+  "Image",
+  "RTCPeerConnection",
+  "Reflect",
+  "SharedWorker",
+  "WebAssembly",
+  "WebSocket",
+  "WebTransport",
+  "Worker",
+  "XMLHttpRequest",
+  "caches",
+  "cookieStore",
+  "eval",
+  "fetch",
+  "indexedDB",
+  "localStorage",
+  "open",
+  "sendBeacon",
+  "serviceWorker",
+  "sessionStorage",
+]);
+
+const forbiddenScriptMembers = new Set([
+  ...forbiddenScriptIdentifiers,
+  "__proto__",
+  "assign",
+  "caches",
+  "constructor",
+  "cssText",
+  "cookie",
+  "cookieStore",
+  "defineProperties",
+  "defineProperty",
+  "fetch",
+  "indexedDB",
+  "insertAdjacentHTML",
+  "insertRule",
+  "localStorage",
+  "open",
+  "outerHTML",
+  "prototype",
+  "replaceSync",
+  "sendBeacon",
+  "serviceWorker",
+  "sessionStorage",
+  "setPrototypeOf",
+  "write",
+  "writeln",
+]);
+
+const networkAttributeNames = new Set([
+  "action",
+  "background",
+  "data",
+  "formAction",
+  "formaction",
+  "href",
+  "ping",
+  "poster",
+  "src",
+  "srcdoc",
+  "srcset",
+]);
 
 class InvalidDoc extends Error {}
 
 function isPrivateHostname(hostnameInput: string): boolean {
-  const hostname = hostnameInput.toLowerCase().replace(/^\[|\]$/g, "");
+  const hostname = hostnameInput
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
   if (
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal") ||
     hostname === "::" ||
-    hostname === "::1" ||
-    /^(?:fc|fd|fe[89ab])/i.test(hostname)
+    hostname === "::1"
   ) {
     return true;
+  }
+
+  if (hostname.includes(":")) {
+    const groups = parseIpv6(hostname);
+    if (groups === undefined) {
+      return true;
+    }
+    const [first = 0, second = 0, third = 0, fourth = 0, fifth = 0, sixth = 0] =
+      groups;
+    if (
+      (first & 0xfe00) === 0xfc00 ||
+      (first & 0xffc0) === 0xfe80 ||
+      (first & 0xff00) === 0xff00
+    ) {
+      return true;
+    }
+    if (
+      first === 0 &&
+      second === 0 &&
+      third === 0 &&
+      fourth === 0 &&
+      fifth === 0 &&
+      sixth === 0xffff
+    ) {
+      return isPrivateIpv4(
+        (groups[6] ?? 0) >> 8,
+        groups[6] ?? 0,
+        (groups[7] ?? 0) >> 8,
+      );
+    }
+    if (
+      first === 0 &&
+      second === 0 &&
+      third === 0 &&
+      fourth === 0 &&
+      fifth === 0 &&
+      sixth === 0
+    ) {
+      return true;
+    }
+    return false;
   }
 
   const octets = hostname.split(".").map(Number);
@@ -71,7 +186,16 @@ function isPrivateHostname(hostnameInput: string): boolean {
   ) {
     return false;
   }
-  const [first = -1, second = -1] = octets;
+  return isPrivateIpv4(octets[0] ?? -1, octets[1] ?? -1, octets[2] ?? -1);
+}
+
+function isPrivateIpv4(
+  first: number,
+  secondInput: number,
+  thirdInput: number,
+): boolean {
+  const second = secondInput & 0xff;
+  const third = thirdInput & 0xff;
   return (
     first === 0 ||
     first === 10 ||
@@ -80,9 +204,37 @@ function isPrivateHostname(hostnameInput: string): boolean {
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
     (first === 192 && second === 168) ||
+    (first === 192 && second === 0 && third === 0) ||
     (first === 198 && (second === 18 || second === 19)) ||
     first >= 224
   );
+}
+
+function parseIpv6(hostname: string): number[] | undefined {
+  const halves = hostname.split("::");
+  if (halves.length > 2) {
+    return undefined;
+  }
+  const leading = halves[0] === "" ? [] : halves[0]?.split(":") ?? [];
+  const trailing = halves.length === 1 || halves[1] === ""
+    ? []
+    : halves[1]?.split(":") ?? [];
+  const missing = 8 - leading.length - trailing.length;
+  if ((halves.length === 1 && missing !== 0) || missing < 0) {
+    return undefined;
+  }
+  const submittedGroups = [
+    ...leading,
+    ...Array.from({ length: missing }, () => "0"),
+    ...trailing,
+  ];
+  if (submittedGroups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))) {
+    return undefined;
+  }
+  const groups = submittedGroups.map((group) => Number.parseInt(group, 16));
+  return groups.length === 8 && groups.every((group) => Number.isInteger(group))
+    ? groups
+    : undefined;
 }
 
 function validateRemoteUrl(valueInput: string, allowData: boolean): void {
@@ -101,23 +253,176 @@ function validateRemoteUrl(valueInput: string, allowData: boolean): void {
   }
 }
 
-function validateCss(css: string): void {
-  if (/@import\b/i.test(css)) {
+function decodeCssIdentifier(value: string): string {
+  return value.replace(
+    /\\([0-9a-f]{1,6})\s?|\\(.)/gi,
+    (_match, hex: string | undefined, escaped: string | undefined) =>
+      hex === undefined ? escaped ?? "" : String.fromCodePoint(Number.parseInt(hex, 16)),
+  );
+}
+
+function validateCss(
+  css: string,
+  context: "declarationList" | "stylesheet",
+  allowRemoteMedia = true,
+): void {
+  const ast = parseCss(css, {
+    context,
+    parseCustomProperty: true,
+    onParseError() {
+      throw new InvalidDoc();
+    },
+  });
+  walkCss(ast, function (node) {
+    if (
+      node.type === "Atrule" &&
+      decodeCssIdentifier(node.name).toLowerCase() === "import"
+    ) {
+      throw new InvalidDoc();
+    }
+    if (node.type === "Url") {
+      if (!node.value.startsWith("#")) {
+        if (!allowRemoteMedia) {
+          throw new InvalidDoc();
+        }
+        validateRemoteUrl(node.value, true);
+      }
+      return;
+    }
+    if (
+      node.type === "String" &&
+      this.function !== null &&
+      ["image", "image-set", "cross-fade"].includes(
+        decodeCssIdentifier(this.function.name).toLowerCase(),
+      )
+    ) {
+      if (!allowRemoteMedia) {
+        throw new InvalidDoc();
+      }
+      validateRemoteUrl(node.value, true);
+    }
+  });
+}
+
+function staticString(expression: Expression | undefined): string | undefined {
+  if (expression?.type === "Literal" && typeof expression.value === "string") {
+    return expression.value;
+  }
+  if (expression?.type === "TemplateLiteral" && expression.expressions.length === 0) {
+    return expression.quasis[0]?.value.cooked ?? undefined;
+  }
+  return undefined;
+}
+
+function memberName(member: MemberExpression): string | undefined {
+  if (!member.computed && member.property.type === "Identifier") {
+    return member.property.name;
+  }
+  if (member.computed && member.property.type === "Literal") {
+    return typeof member.property.value === "string"
+      ? member.property.value
+      : "#numeric";
+  }
+  return undefined;
+}
+
+function validateScriptMember(member: MemberExpression): void {
+  const name = memberName(member);
+  if (name === undefined || forbiddenScriptMembers.has(name)) {
     throw new InvalidDoc();
   }
-  for (const match of css.matchAll(/url\(\s*([^)]+?)\s*\)/gi)) {
-    const submitted = match[1]?.trim().replace(/^(['"])(.*)\1$/, "$2");
-    if (submitted === undefined || submitted.startsWith("#")) {
-      continue;
+}
+
+function validateScriptCall(node: Extract<ScriptNode, { type: "CallExpression" }>): void {
+  if (node.callee.type !== "MemberExpression") {
+    return;
+  }
+  const name = memberName(node.callee);
+  if (name === "click" || name === "dispatchEvent") {
+    throw new InvalidDoc();
+  }
+  if (name !== "setAttribute" && name !== "setAttributeNS" && name !== "setProperty") {
+    return;
+  }
+  if (name === "setProperty") {
+    const property = node.arguments[0];
+    const value = node.arguments[1];
+    const propertyName = property?.type === "SpreadElement"
+      ? undefined
+      : staticString(property);
+    const propertyValue = value?.type === "SpreadElement"
+      ? undefined
+      : staticString(value);
+    if (propertyName === undefined || propertyValue === undefined) {
+      throw new InvalidDoc();
     }
-    validateRemoteUrl(submitted, true);
+    validateCss(`${propertyName}:${propertyValue}`, "declarationList", false);
+    return;
+  }
+  const nameArgument = name === "setAttributeNS" ? node.arguments[1] : node.arguments[0];
+  const valueArgument = name === "setAttributeNS" ? node.arguments[2] : node.arguments[1];
+  const attributeName =
+    nameArgument?.type === "SpreadElement" ? undefined : staticString(nameArgument);
+  if (attributeName === undefined) {
+    throw new InvalidDoc();
+  }
+  if (networkAttributeNames.has(attributeName.toLowerCase())) {
+    throw new InvalidDoc();
+  }
+  if (attributeName === "style") {
+    const style = valueArgument?.type === "SpreadElement"
+      ? undefined
+      : staticString(valueArgument);
+    if (style === undefined) {
+      throw new InvalidDoc();
+    }
+    validateCss(style, "declarationList");
   }
 }
 
 function validateScript(script: string): void {
-  if (forbiddenScriptCapabilities.some((capability) => capability.test(script))) {
-    throw new InvalidDoc();
-  }
+  const ast = parseScript(script, { ecmaVersion: "latest", sourceType: "script" });
+  walkScript(ast, (node) => {
+    if (node.type === "ImportExpression") {
+      throw new InvalidDoc();
+    }
+    if (node.type === "Identifier" && forbiddenScriptIdentifiers.has(node.name)) {
+      throw new InvalidDoc();
+    }
+    if (node.type === "MemberExpression") {
+      validateScriptMember(node);
+    }
+    if (node.type === "CallExpression") {
+      validateScriptCall(node);
+    }
+    if (node.type === "NewExpression") {
+      if (
+        node.callee.type === "Identifier" &&
+        forbiddenScriptIdentifiers.has(node.callee.name)
+      ) {
+        throw new InvalidDoc();
+      }
+    }
+    if (
+      node.type === "AssignmentExpression" &&
+      node.left.type === "MemberExpression"
+    ) {
+      const name = memberName(node.left) ?? "";
+      if (networkAttributeNames.has(name)) {
+        throw new InvalidDoc();
+      }
+      if (
+        node.left.object.type === "MemberExpression" &&
+        memberName(node.left.object) === "style"
+      ) {
+        const value = staticString(node.right);
+        if (value === undefined) {
+          throw new InvalidDoc();
+        }
+        validateCss(`${name}:${value}`, "declarationList", false);
+      }
+    }
+  });
 }
 
 function validateElement(element: Element): void {
@@ -139,7 +444,7 @@ function validateElement(element: Element): void {
       throw new InvalidDoc();
     }
     if (name === "style") {
-      validateCss(value);
+      validateCss(value, "declarationList");
     }
     if (mediaUrlAttributes.has(name)) {
       if (tagName === "script") {
@@ -198,7 +503,7 @@ export async function validateDocHtml(html: string): Promise<boolean> {
       .on("style", {
         element(element) {
           style = "";
-          element.onEndTag(() => validateCss(style));
+          element.onEndTag(() => validateCss(style, "stylesheet"));
         },
         text(text) {
           style += text.text;
@@ -216,33 +521,11 @@ export async function validateDocHtml(html: string): Promise<boolean> {
   }
 }
 
-function randomOpaqueId(): OpaqueId {
-  const bytes = crypto.getRandomValues(new Uint8Array(24));
-  const base64 = btoa(String.fromCharCode(...bytes));
-  return opaqueIdSchema.parse(
-    base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
-  );
-}
-
-function randomWriteEtag(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  const value = Array.from(bytes, (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-  return `"${value}"`;
-}
-
-function nextExpiresAt(retention: Retention): string | null {
-  const duration = {
-    "7d": 7 * 24 * 60 * 60 * 1_000,
-    "30d": 30 * 24 * 60 * 60 * 1_000,
-    "90d": 90 * 24 * 60 * 60 * 1_000,
-    keep: undefined,
-  }[retention];
-  return duration === undefined
-    ? null
-    : new Date(Date.now() + duration).toISOString();
-}
+const docDescriptor: DropDescriptor<"doc", DocContentType> = {
+  kind: "doc",
+  parseContentType: (value) => docContentTypeSchema.parse(value),
+  publicHeaders: { "content-security-policy": docContentSecurityPolicy },
+};
 
 export interface CreateDocInput {
   readonly body: Blob;
@@ -252,196 +535,32 @@ export interface CreateDocInput {
   readonly retention: Retention;
 }
 
-export async function createDoc(
+export function createDoc(
   store: R2Bucket,
   input: CreateDocInput,
 ): Promise<DocUploadResponse> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const opaqueId = randomOpaqueId();
-    const etag = randomWriteEtag();
-    const expiresAt = nextExpiresAt(input.retention);
-    const object = await store.put(`docs/${opaqueId}`, input.body, {
-      onlyIf: { etagDoesNotMatch: "*" },
-      httpMetadata: {
-        cacheControl: "no-store",
-        contentDisposition: "inline",
-        contentType: docContentType,
-      },
-      customMetadata: {
-        creatorCredentialId: input.credentialId,
-        originalFilename: input.originalFilename,
-        kind: "doc",
-        detectedType: docContentType,
-        size: String(input.body.size),
-        retention: input.retention,
-        ...(expiresAt === null ? {} : { expiresAt }),
-        writeEtag: etag,
-      },
-    });
-    if (object === null) {
-      continue;
-    }
-
-    return {
-      url: new URL(`/docs/${opaqueId}`, input.publicOrigin).href,
-      kind: "doc",
-      contentType: docContentType,
-      size: object.size,
-      retention: input.retention,
-      expiresAt,
-      etag,
-    };
-  }
-
-  throw new Error("Could not allocate an Opaque ID after repeated collisions");
-}
-
-type StoredDocMetadata = {
-  readonly credentialId: CredentialId;
-  readonly originalFilename: string;
-  readonly retention: Retention;
-  readonly writeEtag: string;
-};
-
-type DocWriteAuthorization<T extends R2Object> =
-  | {
-      readonly status: "authorized";
-      readonly current: T;
-      readonly metadata: StoredDocMetadata;
-    }
-  | { readonly status: "forbidden" }
-  | { readonly status: "missing" }
-  | { readonly status: "stale" };
-
-function authorizeDocWrite<T extends R2Object>(
-  current: T | null,
-  credentialId: CredentialId,
-  observedEtag: string,
-): DocWriteAuthorization<T> {
-  if (current === null || current.customMetadata?.kind !== "doc") {
-    return { status: "missing" };
-  }
-  const metadata: StoredDocMetadata = {
-    credentialId: credentialIdSchema.parse(
-      current.customMetadata.creatorCredentialId,
-    ),
-    originalFilename: current.customMetadata.originalFilename ?? "",
-    retention: (
-      ["7d", "30d", "90d", "keep"] as const
-    ).find((retention) => retention === current.customMetadata?.retention) ?? "keep",
-    writeEtag: current.customMetadata.writeEtag ?? current.httpEtag,
-  };
-  if (metadata.credentialId !== credentialId) {
-    return { status: "forbidden" };
-  }
-  if (metadata.writeEtag !== observedEtag) {
-    return { status: "stale" };
-  }
-  return { status: "authorized", current, metadata };
-}
-
-function exactUploadTime(uploaded: Date): R2Conditional {
-  const time = uploaded.getTime();
-  return {
-    uploadedAfter: new Date(time - 1),
-    uploadedBefore: new Date(time + 1),
-    secondsGranularity: false,
-  };
-}
-
-async function waitForNextUploadTime(uploaded: Date): Promise<void> {
-  const delay = uploaded.getTime() + 1 - Date.now();
-  if (delay > 0) {
-    await new Promise((resolve) => setTimeout(resolve, delay));
-  }
-}
-
-function docUploadResponse(
-  opaqueId: OpaqueId,
-  publicOrigin: string,
-  size: number,
-  retention: Retention,
-  expiresAt: string | null,
-  etag: string,
-): DocUploadResponse {
-  return {
-    url: new URL(`/docs/${opaqueId}`, publicOrigin).href,
-    kind: "doc",
+  return createDrop(store, docDescriptor, {
+    ...input,
     contentType: docContentType,
-    size,
-    retention,
-    expiresAt,
-    etag,
-  };
+  });
 }
 
-export interface ReplaceDocInput {
-  readonly body: Blob;
-  readonly credentialId: CredentialId;
+export interface ReplaceDocInput extends Omit<CreateDocInput, "retention"> {
   readonly observedEtag: string;
   readonly opaqueId: OpaqueId;
-  readonly originalFilename: string;
-  readonly publicOrigin: string;
   readonly retention: Retention | undefined;
 }
 
-export type ReplaceDocResult =
-  | { readonly status: "forbidden" }
-  | { readonly status: "missing" }
-  | { readonly status: "stale" }
-  | { readonly status: "replaced"; readonly response: DocUploadResponse };
+export type ReplaceDocResult = ReplaceDropResult<"doc", DocContentType>;
 
-export async function replaceDoc(
+export function replaceDoc(
   store: R2Bucket,
   input: ReplaceDocInput,
 ): Promise<ReplaceDocResult> {
-  const key = `docs/${input.opaqueId}`;
-  const current = await store.head(key);
-  const authorization = authorizeDocWrite(
-    current,
-    input.credentialId,
-    input.observedEtag,
-  );
-  if (authorization.status !== "authorized") {
-    return authorization;
-  }
-
-  const retention = input.retention ?? authorization.metadata.retention;
-  const expiresAt = nextExpiresAt(retention);
-  const etag = randomWriteEtag();
-  await waitForNextUploadTime(authorization.current.uploaded);
-  const object = await store.put(key, input.body, {
-    onlyIf: exactUploadTime(authorization.current.uploaded),
-    httpMetadata: {
-      cacheControl: "no-store",
-      contentDisposition: "inline",
-      contentType: docContentType,
-    },
-    customMetadata: {
-      creatorCredentialId: input.credentialId,
-      originalFilename: input.originalFilename,
-      kind: "doc",
-      detectedType: docContentType,
-      size: String(input.body.size),
-      retention,
-      ...(expiresAt === null ? {} : { expiresAt }),
-      writeEtag: etag,
-    },
+  return replaceDrop(store, docDescriptor, {
+    ...input,
+    contentType: docContentType,
   });
-  if (object === null) {
-    return { status: "stale" };
-  }
-  return {
-    status: "replaced",
-    response: docUploadResponse(
-      input.opaqueId,
-      input.publicOrigin,
-      object.size,
-      retention,
-      expiresAt,
-      etag,
-    ),
-  };
 }
 
 export interface ChangeDocRetentionInput {
@@ -452,120 +571,23 @@ export interface ChangeDocRetentionInput {
   readonly retention: Retention;
 }
 
-export type ChangeDocRetentionResult =
-  | { readonly status: "forbidden" }
-  | { readonly status: "missing" }
-  | { readonly status: "stale" }
-  | { readonly status: "updated"; readonly response: DocUploadResponse };
+export type ChangeDocRetentionResult = ChangeDropRetentionResult<
+  "doc",
+  DocContentType
+>;
 
-export async function changeDocRetention(
+export function changeDocRetention(
   store: R2Bucket,
   input: ChangeDocRetentionInput,
 ): Promise<ChangeDocRetentionResult> {
-  const key = `docs/${input.opaqueId}`;
-  const current = await store.get(key);
-  const authorization = authorizeDocWrite(
-    current,
-    input.credentialId,
-    input.observedEtag,
-  );
-  if (authorization.status !== "authorized") {
-    return authorization;
-  }
-
-  const expiresAt = nextExpiresAt(input.retention);
-  const etag = randomWriteEtag();
-  await waitForNextUploadTime(authorization.current.uploaded);
-  const object = await store.put(key, authorization.current.body, {
-    onlyIf: exactUploadTime(authorization.current.uploaded),
-    httpMetadata: authorization.current.httpMetadata,
-    customMetadata: {
-      creatorCredentialId: authorization.metadata.credentialId,
-      originalFilename: authorization.metadata.originalFilename,
-      kind: "doc",
-      detectedType: docContentType,
-      size: String(authorization.current.size),
-      retention: input.retention,
-      ...(expiresAt === null ? {} : { expiresAt }),
-      writeEtag: etag,
-    },
-  });
-  if (object === null) {
-    return { status: "stale" };
-  }
-  return {
-    status: "updated",
-    response: docUploadResponse(
-      input.opaqueId,
-      input.publicOrigin,
-      object.size,
-      input.retention,
-      expiresAt,
-      etag,
-    ),
-  };
+  return changeDropRetention(store, docDescriptor, input);
 }
 
-function publicDocHeaders(object: R2Object): Headers {
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set("accept-ranges", "bytes");
-  headers.set("cache-control", "no-store");
-  headers.set("content-security-policy", docContentSecurityPolicy);
-  headers.set("etag", object.httpEtag);
-  headers.set("referrer-policy", "no-referrer");
-  headers.set("x-content-type-options", "nosniff");
-  headers.set("x-robots-tag", "noindex, nofollow, noarchive");
-  return headers;
-}
-
-export async function serveDoc(
+export function serveDoc(
   store: R2Bucket,
   opaqueId: OpaqueId,
   method: "GET" | "HEAD",
   requestHeaders: Headers,
 ): Promise<Response> {
-  const key = `docs/${opaqueId}`;
-  const head = await store.head(key);
-  if (head === null) {
-    return new Response(null, { status: 404 });
-  }
-
-  const headers = publicDocHeaders(head);
-  if (matchesEtag(requestHeaders.get("if-none-match") ?? undefined, head.httpEtag)) {
-    return new Response(null, { status: 304, headers });
-  }
-
-  const range = parseByteRange(
-    requestHeaders.get("range") ?? undefined,
-    head.size,
-  );
-  if (range === null) {
-    headers.set("content-range", `bytes */${head.size}`);
-    headers.set("content-length", "0");
-    return new Response(null, { status: 416, headers });
-  }
-
-  const status = range === undefined ? 200 : 206;
-  const responseSize = range?.length ?? head.size;
-  headers.set("content-length", String(responseSize));
-  if (range !== undefined) {
-    headers.set(
-      "content-range",
-      `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`,
-    );
-  }
-
-  if (method === "HEAD") {
-    return new Response(null, { status, headers });
-  }
-
-  const object = await store.get(
-    key,
-    range === undefined ? undefined : { range },
-  );
-  if (object === null) {
-    return new Response(null, { status: 404 });
-  }
-  return new Response(object.body, { status, headers });
+  return serveDrop(store, docDescriptor, opaqueId, method, requestHeaders);
 }

@@ -93,8 +93,8 @@ describe("Doc creation and public reads", () => {
     <svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" /></svg>
     <img src="data:image/png;base64,AA==" alt="Data image">
     <video src="https://cdn.example.com/demo.mp4" controls></video>
-    <a href="https://example.com/details">Details</a>
-    <script>document.querySelector("a")?.classList.add("ready");</script>
+    <a href="https://example.com/details" target="_blank">Details</a>
+    <script>const label = "fetch"; document.querySelector("a")?.classList.add(label);</script>
   </body>
 </html>`;
 
@@ -116,7 +116,7 @@ describe("Doc creation and public reads", () => {
       "noindex, nofollow, noarchive",
     );
     expect(publicResponse.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts",
+      "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
     );
     expect(await publicResponse.text()).toBe(html);
   });
@@ -146,6 +146,18 @@ describe("Doc creation and public reads", () => {
         "private-network URLs",
         '<img src="https://127.0.0.1/private.png" alt="Private">',
       ],
+      [
+        "private-network hostnames with a trailing dot",
+        '<img src="https://localhost./private.png" alt="Private">',
+      ],
+      [
+        "IPv4-mapped private IPv6 URLs",
+        '<img src="https://[::ffff:127.0.0.1]/private.png" alt="Private">',
+      ],
+      [
+        "IPv6 multicast URLs",
+        '<img src="https://[ff02::1]/private.png" alt="Private">',
+      ],
       ["storage", "<script>localStorage.setItem('token', 'secret')</script>"],
       [
         "scripted network requests",
@@ -155,6 +167,22 @@ describe("Doc creation and public reads", () => {
       [
         "script-created popups",
         "<script>window.open('https://example.com')</script>",
+      ],
+      [
+        "constructed network API access",
+        "<script>globalThis['fe' + 'tch']('https://example.com')</script>",
+      ],
+      [
+        "script-created media requests",
+        "<script>new Image().src = 'https://example.com/pixel.png'</script>",
+      ],
+      [
+        "escaped linked CSS",
+        '<style>@\\69mport "https://example.com/app.css";</style>',
+      ],
+      [
+        "CSS private-network image sets",
+        '<style>body { background: image-set("https://127.0.0.1/a.png" 1x) }</style>',
       ],
     ] as const;
 
@@ -323,10 +351,20 @@ describe("Doc creation and public reads", () => {
       },
     });
 
-    // Cancelling an oversized upload closes workerd's reused local connection,
-    // so keep this terminal assertion last in the process test.
+    let remaining = maxDocSize + 1;
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (remaining === 0) {
+          controller.close();
+          return;
+        }
+        const length = Math.min(64 * 1024, remaining);
+        controller.enqueue(new Uint8Array(length).fill(0x20));
+        remaining -= length;
+      },
+    });
     const oversizedResponse = await fetch(`${workerd.url}/api/docs`, {
-      body: `${boundaryDoc}a`,
+      body: oversizedBody,
       headers: uploadHeaders(uploadKey.key),
       method: "POST",
     });
