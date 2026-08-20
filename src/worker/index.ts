@@ -3,15 +3,20 @@ import { z } from "zod";
 
 import {
   opaqueIdSchema,
+  retentionSchema,
+  retentionUpdateRequestSchema,
   type FileContentType,
+  type Retention,
 } from "../shared/files.ts";
 import { credentialIdSchema } from "../shared/upload-keys.ts";
 import {
+  changeFileRetention,
   createFile,
   detectFileContentType,
   readUploadBody,
   replaceFile,
   serveFile,
+  sweepExpiredFiles,
 } from "./files.ts";
 import {
   authenticateUploadKey,
@@ -34,6 +39,14 @@ const invalidCredential = {
   error: {
     code: "invalid_credential",
     message: "The provided credential is invalid.",
+  },
+} as const;
+
+// This code is part of the stable HTTP contract documented in docs/design.md.
+const staleDrop = {
+  error: {
+    code: "stale_object",
+    message: "The Drop changed since this client last observed it.",
   },
 } as const;
 
@@ -92,6 +105,29 @@ function jsonError(
   return Response.json({ error: { code, message } }, { status });
 }
 
+type RetentionInputResult =
+  | { readonly status: "error"; readonly response: Response }
+  | { readonly status: "ok"; readonly retention: Retention | undefined };
+
+function readRetentionHeader(request: Request): RetentionInputResult {
+  const submitted = request.headers.get("Drop-Retention");
+  if (submitted === null) {
+    return { status: "ok", retention: undefined };
+  }
+
+  const retention = retentionSchema.safeParse(submitted);
+  return retention.success
+    ? { status: "ok", retention: retention.data }
+    : {
+        status: "error",
+        response: jsonError(
+          "invalid_request",
+          "Drop-Retention must be 7d, 30d, 90d, or keep.",
+          400,
+        ),
+      };
+}
+
 async function readFileUploadRequest(
   request: Request,
 ): Promise<FileUploadInputResult> {
@@ -143,7 +179,7 @@ function bearerCredential(authorization: string | undefined): string {
     : "";
 }
 
-const app = new Hono<{ Bindings: WorkerBindings }>();
+export const app = new Hono<{ Bindings: WorkerBindings }>();
 
 app.use("/api/admin/*", async (context, next) => {
   const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
@@ -195,6 +231,11 @@ app.post("/api/files", async (context) => {
     return context.json(invalidCredential, 401);
   }
 
+  const retention = readRetentionHeader(context.req.raw);
+  if (retention.status === "error") {
+    return retention.response;
+  }
+
   const upload = await readFileUploadRequest(context.req.raw);
   if (upload.status === "error") {
     return upload.response;
@@ -202,11 +243,14 @@ app.post("/api/files", async (context) => {
 
   const created = await createFile(
     context.env.CONTENT_STORE,
-    upload.input.body,
-    upload.input.contentType,
-    credentialId,
-    upload.input.originalFilename,
-    new URL(context.req.url).origin,
+    {
+      body: upload.input.body,
+      contentType: upload.input.contentType,
+      credentialId,
+      originalFilename: upload.input.originalFilename,
+      publicOrigin: new URL(context.req.url).origin,
+      retention: retention.retention ?? "keep",
+    },
   );
   console.log(
     JSON.stringify({
@@ -260,6 +304,11 @@ app.put("/api/files/:opaqueId", async (context) => {
     );
   }
 
+  const retention = readRetentionHeader(context.req.raw);
+  if (retention.status === "error") {
+    return retention.response;
+  }
+
   const upload = await readFileUploadRequest(context.req.raw);
   if (upload.status === "error") {
     return upload.response;
@@ -267,13 +316,16 @@ app.put("/api/files/:opaqueId", async (context) => {
 
   const result = await replaceFile(
     context.env.CONTENT_STORE,
-    opaqueId.data,
-    upload.input.body,
-    upload.input.contentType,
-    credentialId,
-    upload.input.originalFilename,
-    observedEtag,
-    new URL(context.req.url).origin,
+    {
+      body: upload.input.body,
+      contentType: upload.input.contentType,
+      credentialId,
+      observedEtag,
+      opaqueId: opaqueId.data,
+      originalFilename: upload.input.originalFilename,
+      publicOrigin: new URL(context.req.url).origin,
+      retention: retention.retention,
+    },
   );
   if (result.status === "missing") {
     return context.json(
@@ -293,15 +345,7 @@ app.put("/api/files/:opaqueId", async (context) => {
     );
   }
   if (result.status === "stale") {
-    return context.json(
-      {
-        error: {
-          code: "stale_object",
-          message: "The Drop changed since this client last observed it.",
-        },
-      },
-      409,
-    );
+    return context.json(staleDrop, 409);
   }
 
   console.log(
@@ -313,6 +357,97 @@ app.put("/api/files/:opaqueId", async (context) => {
       size: result.response.size,
       retention: result.response.retention,
       outcome: "replaced",
+      status: 200,
+    }),
+  );
+  return context.json(result.response);
+});
+
+app.patch("/api/files/:opaqueId", async (context) => {
+  const credentialId = await authenticateUploadKey(
+    context.env.CONTROL_STORE,
+    bearerCredential(context.req.header("Authorization")),
+  );
+  if (credentialId === undefined) {
+    return context.json(invalidCredential, 401);
+  }
+
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      { error: { code: "not_found", message: "The File does not exist." } },
+      404,
+    );
+  }
+
+  const observedEtag = context.req.header("If-Match");
+  if (observedEtag === undefined) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "If-Match is required to change File retention.",
+        },
+      },
+      400,
+    );
+  }
+
+  const input = retentionUpdateRequestSchema.safeParse(
+    await context.req.json().catch(() => undefined),
+  );
+  if (!input.success) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "The request must contain a valid Retention Class.",
+        },
+      },
+      400,
+    );
+  }
+
+  const result = await changeFileRetention(
+    context.env.CONTENT_STORE,
+    {
+      credentialId,
+      observedEtag,
+      opaqueId: opaqueId.data,
+      publicOrigin: new URL(context.req.url).origin,
+      retention: input.data.retention,
+    },
+  );
+  if (result.status === "missing") {
+    return context.json(
+      { error: { code: "not_found", message: "The File does not exist." } },
+      404,
+    );
+  }
+  if (result.status === "forbidden") {
+    return context.json(
+      {
+        error: {
+          code: "wrong_owner",
+          message: "This Upload Key did not create the File.",
+        },
+      },
+      403,
+    );
+  }
+  if (result.status === "stale") {
+    return context.json(staleDrop, 409);
+  }
+
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId,
+      url: result.response.url,
+      kind: result.response.kind,
+      size: result.response.size,
+      retention: result.response.retention,
+      outcome: "retention_changed",
       status: 200,
     }),
   );
@@ -333,4 +468,16 @@ app.on(["GET", "HEAD"], "/files/:opaqueId", async (context) => {
   );
 });
 
-export default app;
+const worker: ExportedHandler<WorkerBindings> = {
+  fetch(request, environment, executionContext) {
+    return app.fetch(request, environment, executionContext);
+  },
+  async scheduled(controller, environment) {
+    await sweepExpiredFiles(
+      environment.CONTENT_STORE,
+      controller.scheduledTime,
+    );
+  },
+};
+
+export default worker;

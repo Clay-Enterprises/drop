@@ -466,6 +466,62 @@ describe("drop File", () => {
     ).toMatchObject({ url: body.url });
   });
 
+  test("creates a new Drop when expiry wins a concurrent Re-drop race", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "expiring.png");
+    await writeFile(path, onePixelPng);
+    const uploadKey = await createUploadKey(workerd);
+    const environment = { DROP_UPLOAD_KEY: uploadKey.key };
+    const created = await runCli(
+      workerd,
+      [path, "--retention", "7d", "--json"],
+      { cwd: directory, environment },
+    );
+    expect(created.exitCode).toBe(0);
+    const first = JSON.parse(created.stdout) as { url: string };
+    const opaqueId = new URL(first.url).pathname.slice("/files/".length);
+    await fetch(`${workerd.url}/__test/content-objects/${opaqueId}/expiry`, {
+      body: JSON.stringify({ expiresAt: new Date(0).toISOString() }),
+      headers: { "content-type": "application/json" },
+      method: "PATCH",
+    });
+    await fetch(`${workerd.url}/__test/expiry-race`, {
+      body: JSON.stringify({ opaqueId, pause: "after-tombstone" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const scheduled = await fetch(`${workerd.url}/__scheduled`);
+    const paused = await fetch(`${workerd.url}/__test/expiry-race/wait`);
+    expect(scheduled.status).toBe(200);
+    expect(paused.status).toBe(204);
+    await writeFile(path, onePixelGif);
+
+    const replacement = await runCli(workerd, [path, "--json"], {
+      cwd: directory,
+      environment,
+    });
+    const released = await fetch(`${workerd.url}/__test/expiry-race/release`, {
+      method: "POST",
+    });
+
+    expect(released.status).toBe(204);
+    expect(replacement.exitCode).toBe(0);
+    const next = JSON.parse(replacement.stdout) as {
+      contentType: string;
+      url: string;
+    };
+    expect(next).toMatchObject({ contentType: "image/gif" });
+    expect(next.url).not.toBe(first.url);
+    expect((await fetch(first.url)).status).toBe(404);
+    expect((await fetch(next.url)).status).toBe(200);
+    const bindingsPath = join(directory, "state", "drop", "bindings");
+    const entries = await readdir(bindingsPath);
+    expect(entries).toHaveLength(1);
+    expect(
+      JSON.parse(await readFile(join(bindingsPath, entries[0] ?? ""), "utf8")),
+    ).toMatchObject({ url: next.url });
+  });
+
   test("keeps unrelated concurrent path bindings independently", async () => {
     const directory = await temporaryDirectory();
     await writeFile(join(directory, "first.png"), onePixelPng);
@@ -653,6 +709,125 @@ describe("drop File", () => {
       retention: "keep",
       expiresAt: null,
       etag: expect.stringMatching(/^"[^"]+"$/),
+    });
+  });
+
+  test("creates a File with the selected Retention Class", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "temporary.png");
+    await writeFile(path, onePixelPng);
+    const uploadKey = await createUploadKey(workerd);
+
+    const result = await runCli(
+      workerd,
+      ["temporary.png", "--retention", "7d", "--json"],
+      {
+        cwd: directory,
+        environment: { DROP_UPLOAD_KEY: uploadKey.key },
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      retention: "7d",
+      expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    });
+    const bindingsPath = join(directory, "state", "drop", "bindings");
+    const bindingFilename = (await readdir(bindingsPath))[0];
+    expect(
+      JSON.parse(
+        await readFile(join(bindingsPath, bindingFilename ?? ""), "utf8"),
+      ),
+    ).toMatchObject({ retention: "7d" });
+  });
+
+  test("changes retention by Local Path Identity and updates its binding", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "retained.png");
+    await writeFile(path, onePixelPng);
+    const uploadKey = await createUploadKey(workerd);
+    const environment = { DROP_UPLOAD_KEY: uploadKey.key };
+    const created = await runCli(
+      workerd,
+      [path, "--retention", "7d", "--json"],
+      { cwd: directory, environment },
+    );
+    expect(created.exitCode).toBe(0);
+    const first = JSON.parse(created.stdout) as {
+      etag: string;
+      url: string;
+    };
+
+    const result = await runCli(
+      workerd,
+      ["retention", path, "90d", "--json"],
+      { cwd: directory, environment },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      url: first.url,
+      retention: "90d",
+      expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      etag: expect.not.stringMatching(first.etag),
+    });
+    const bindingsPath = join(directory, "state", "drop", "bindings");
+    const bindingFilename = (await readdir(bindingsPath))[0];
+    expect(
+      JSON.parse(
+        await readFile(join(bindingsPath, bindingFilename ?? ""), "utf8"),
+      ),
+    ).toMatchObject({
+      url: first.url,
+      retention: "90d",
+      etag: expect.not.stringMatching(first.etag),
+    });
+    const publicResponse = await fetch(first.url);
+    expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+      onePixelPng,
+    );
+  });
+
+  test("changes retention by exact Unlisted URL", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "by-url.png");
+    await writeFile(path, onePixelPng);
+    const uploadKey = await createUploadKey(workerd);
+    const environment = { DROP_UPLOAD_KEY: uploadKey.key };
+    const created = await runCli(workerd, [path, "--json"], {
+      cwd: directory,
+      environment,
+    });
+    expect(created.exitCode).toBe(0);
+    const first = JSON.parse(created.stdout) as {
+      etag: string;
+      url: string;
+    };
+
+    const result = await runCli(
+      workerd,
+      ["retention", first.url, "30d", "--json"],
+      { cwd: directory, environment },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      url: first.url,
+      retention: "30d",
+      expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    });
+    const bindingsPath = join(directory, "state", "drop", "bindings");
+    const bindingFilename = (await readdir(bindingsPath))[0];
+    expect(
+      JSON.parse(
+        await readFile(join(bindingsPath, bindingFilename ?? ""), "utf8"),
+      ),
+    ).toMatchObject({
+      url: first.url,
+      retention: "30d",
+      etag: expect.not.stringMatching(first.etag),
     });
   });
 

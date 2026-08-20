@@ -12,6 +12,10 @@ export type FileContentType = z.infer<typeof fileContentTypeSchema>;
 export const retentionSchema = z.enum(["7d", "30d", "90d", "keep"]);
 export type Retention = z.infer<typeof retentionSchema>;
 
+export const retentionUpdateRequestSchema = z
+  .object({ retention: retentionSchema })
+  .strict();
+
 export const opaqueIdSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{32}$/)

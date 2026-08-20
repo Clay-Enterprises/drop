@@ -3,6 +3,9 @@
   "name": "drop",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-20",
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  },
   "r2_buckets": [
     {
       "binding": "CONTROL_STORE",

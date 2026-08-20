@@ -32,6 +32,7 @@ export async function startWorkerd(): Promise<WorkerdServer> {
       String(port),
       "--persist-to",
       persistencePath,
+      "--test-scheduled",
       "--var",
       `ADMIN_KEY:${testAdminKey}`,
       "--log-level",

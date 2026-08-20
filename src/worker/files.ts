@@ -1,10 +1,15 @@
-import type { CredentialId } from "../shared/upload-keys.ts";
+import {
+  credentialIdSchema,
+  type CredentialId,
+} from "../shared/upload-keys.ts";
 import {
   type FileContentType,
+  fileContentTypeSchema,
   opaqueIdSchema,
   retentionSchema,
   type FileUploadResponse,
   type OpaqueId,
+  type Retention,
 } from "../shared/files.ts";
 
 export const maxFileSize = 95 * 1024 * 1024;
@@ -105,47 +110,138 @@ export async function readUploadBody(
   }
 }
 
-export async function createFile(
-  store: R2Bucket,
-  body: Blob,
-  contentType: FileContentType,
+type FileWriteState = {
+  readonly contentType: FileContentType;
+  readonly expiresAt: string | null;
+  readonly retention: Retention;
+  readonly size: number;
+  readonly writeEtag: string;
+};
+
+type StoredFileMetadata = {
+  readonly contentType: FileContentType;
+  readonly credentialId: CredentialId;
+  readonly originalFilename: string;
+  readonly retention: Retention;
+  readonly writeEtag: string;
+};
+
+type FileWriteAuthorization<T extends R2Object> =
+  | {
+      readonly status: "authorized";
+      readonly current: T;
+      readonly metadata: StoredFileMetadata;
+    }
+  | { readonly status: "forbidden" }
+  | { readonly status: "missing" }
+  | { readonly status: "stale" };
+
+function authorizeFileWrite<T extends R2Object>(
+  current: T | null,
+  credentialId: CredentialId,
+  observedEtag: string,
+): FileWriteAuthorization<T> {
+  if (current === null || current.customMetadata?.kind !== "file") {
+    return { status: "missing" };
+  }
+
+  const metadata: StoredFileMetadata = {
+    contentType: fileContentTypeSchema.parse(
+      current.customMetadata.detectedType,
+    ),
+    credentialId: credentialIdSchema.parse(
+      current.customMetadata.creatorCredentialId,
+    ),
+    originalFilename: current.customMetadata.originalFilename ?? "",
+    retention: retentionSchema.parse(current.customMetadata.retention),
+    writeEtag: current.customMetadata.writeEtag ?? current.httpEtag,
+  };
+  if (metadata.credentialId !== credentialId) {
+    return { status: "forbidden" };
+  }
+  if (metadata.writeEtag !== observedEtag) {
+    return { status: "stale" };
+  }
+  return { status: "authorized", current, metadata };
+}
+
+function fileCustomMetadata(
   credentialId: CredentialId,
   originalFilename: string,
+  state: FileWriteState,
+): Record<string, string> {
+  return {
+    creatorCredentialId: credentialId,
+    originalFilename,
+    kind: "file",
+    detectedType: state.contentType,
+    size: String(state.size),
+    retention: state.retention,
+    ...(state.expiresAt === null ? {} : { expiresAt: state.expiresAt }),
+    writeEtag: state.writeEtag,
+  };
+}
+
+function fileUploadResponse(
+  opaqueId: OpaqueId,
   publicOrigin: string,
+  state: FileWriteState,
+): FileUploadResponse {
+  return {
+    url: new URL(`/files/${opaqueId}`, publicOrigin).href,
+    kind: "file",
+    contentType: state.contentType,
+    size: state.size,
+    retention: state.retention,
+    expiresAt: state.expiresAt,
+    etag: state.writeEtag,
+  };
+}
+
+export interface CreateFileInput {
+  readonly body: Blob;
+  readonly contentType: FileContentType;
+  readonly credentialId: CredentialId;
+  readonly originalFilename: string;
+  readonly publicOrigin: string;
+  readonly retention: Retention;
+}
+
+export async function createFile(
+  store: R2Bucket,
+  input: CreateFileInput,
 ): Promise<FileUploadResponse> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const opaqueId = randomOpaqueId();
     const writeEtag = randomWriteEtag();
-    const object = await store.put(`files/${opaqueId}`, body, {
+    const state: FileWriteState = {
+      contentType: input.contentType,
+      expiresAt: nextExpiresAt(input.retention),
+      retention: input.retention,
+      size: input.body.size,
+      writeEtag,
+    };
+    const object = await store.put(`files/${opaqueId}`, input.body, {
       onlyIf: { etagDoesNotMatch: "*" },
       httpMetadata: {
         cacheControl: "no-store",
         contentDisposition: "inline",
-        contentType,
+        contentType: input.contentType,
       },
-      customMetadata: {
-        creatorCredentialId: credentialId,
-        originalFilename,
-        kind: "file",
-        detectedType: contentType,
-        size: String(body.size),
-        retention: "keep",
-        writeEtag,
-      },
+      customMetadata: fileCustomMetadata(
+        input.credentialId,
+        input.originalFilename,
+        state,
+      ),
     });
     if (object === null) {
       continue;
     }
 
-    return {
-      url: new URL(`/files/${opaqueId}`, publicOrigin).href,
-      kind: "file",
-      contentType,
+    return fileUploadResponse(opaqueId, input.publicOrigin, {
+      ...state,
       size: object.size,
-      retention: "keep",
-      expiresAt: null,
-      etag: writeEtag,
-    };
+    });
   }
 
   throw new Error("Could not allocate an Opaque ID after repeated collisions");
@@ -157,7 +253,13 @@ export type ReplaceFileResult =
   | { readonly status: "replaced"; readonly response: FileUploadResponse }
   | { readonly status: "stale" };
 
-function nextExpiresAt(retention: FileUploadResponse["retention"]): string | null {
+export type ChangeFileRetentionResult =
+  | { readonly status: "forbidden" }
+  | { readonly status: "missing" }
+  | { readonly status: "stale" }
+  | { readonly status: "updated"; readonly response: FileUploadResponse };
+
+function nextExpiresAt(retention: Retention): string | null {
   const duration = {
     "7d": 7 * 24 * 60 * 60 * 1_000,
     "30d": 30 * 24 * 60 * 60 * 1_000,
@@ -169,66 +271,73 @@ function nextExpiresAt(retention: FileUploadResponse["retention"]): string | nul
     : new Date(Date.now() + duration).toISOString();
 }
 
-async function waitForNextUploadTime(uploaded: Date): Promise<number> {
+async function waitForNextUploadTime(uploaded: Date): Promise<void> {
   const nextUploadTime = uploaded.getTime() + 1;
   const delay = nextUploadTime - Date.now();
   if (delay > 0) {
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
-  return nextUploadTime;
+}
+
+function exactUploadTime(uploaded: Date): R2Conditional {
+  const time = uploaded.getTime();
+  return {
+    uploadedAfter: new Date(time - 1),
+    uploadedBefore: new Date(time + 1),
+    secondsGranularity: false,
+  };
+}
+
+export interface ReplaceFileInput {
+  readonly body: Blob;
+  readonly contentType: FileContentType;
+  readonly credentialId: CredentialId;
+  readonly observedEtag: string;
+  readonly originalFilename: string;
+  readonly opaqueId: OpaqueId;
+  readonly publicOrigin: string;
+  readonly retention: Retention | undefined;
 }
 
 export async function replaceFile(
   store: R2Bucket,
-  opaqueId: OpaqueId,
-  body: Blob,
-  contentType: FileContentType,
-  credentialId: CredentialId,
-  originalFilename: string,
-  observedEtag: string,
-  publicOrigin: string,
+  input: ReplaceFileInput,
 ): Promise<ReplaceFileResult> {
-  const key = `files/${opaqueId}`;
+  const key = `files/${input.opaqueId}`;
   const current = await store.head(key);
-  if (current === null) {
-    return { status: "missing" };
-  }
-  if (current.customMetadata?.creatorCredentialId !== credentialId) {
-    return { status: "forbidden" };
-  }
-  const currentWriteEtag =
-    current.customMetadata?.writeEtag ?? current.httpEtag;
-  if (currentWriteEtag !== observedEtag) {
-    return { status: "stale" };
+  const authorization = authorizeFileWrite(
+    current,
+    input.credentialId,
+    input.observedEtag,
+  );
+  if (authorization.status !== "authorized") {
+    return authorization;
   }
 
-  const retention = retentionSchema.parse(current.customMetadata.retention);
-  const expiresAt = nextExpiresAt(retention);
-  const writeEtag = randomWriteEtag();
-  const nextUploadTime = await waitForNextUploadTime(current.uploaded);
-  const object = await store.put(key, body, {
+  const retention =
+    input.retention ?? authorization.metadata.retention;
+  const state: FileWriteState = {
+    contentType: input.contentType,
+    expiresAt: nextExpiresAt(retention),
+    retention,
+    size: input.body.size,
+    writeEtag: randomWriteEtag(),
+  };
+  await waitForNextUploadTime(authorization.current.uploaded);
+  const object = await store.put(key, input.body, {
     // R2 content ETags can recur for identical bytes. Upload time identifies
     // the exact object version while the API ETag guards the client's view.
-    onlyIf: {
-      uploadedAfter: new Date(nextUploadTime - 2),
-      uploadedBefore: new Date(nextUploadTime),
-      secondsGranularity: false,
-    },
+    onlyIf: exactUploadTime(authorization.current.uploaded),
     httpMetadata: {
       cacheControl: "no-store",
       contentDisposition: "inline",
-      contentType,
+      contentType: input.contentType,
     },
-    customMetadata: {
-      creatorCredentialId: credentialId,
-      originalFilename,
-      kind: "file",
-      detectedType: contentType,
-      size: String(body.size),
-      retention,
-      ...(expiresAt === null ? {} : { expiresAt }),
-      writeEtag,
-    },
+    customMetadata: fileCustomMetadata(
+      input.credentialId,
+      input.originalFilename,
+      state,
+    ),
   });
   if (object === null) {
     return { status: "stale" };
@@ -236,16 +345,136 @@ export async function replaceFile(
 
   return {
     status: "replaced",
-    response: {
-      url: new URL(`/files/${opaqueId}`, publicOrigin).href,
-      kind: "file",
-      contentType,
+    response: fileUploadResponse(input.opaqueId, input.publicOrigin, {
+      ...state,
       size: object.size,
-      retention,
-      expiresAt,
-      etag: writeEtag,
-    },
+    }),
   };
+}
+
+export interface ChangeFileRetentionInput {
+  readonly credentialId: CredentialId;
+  readonly observedEtag: string;
+  readonly opaqueId: OpaqueId;
+  readonly publicOrigin: string;
+  readonly retention: Retention;
+}
+
+export async function changeFileRetention(
+  store: R2Bucket,
+  input: ChangeFileRetentionInput,
+): Promise<ChangeFileRetentionResult> {
+  const key = `files/${input.opaqueId}`;
+  const current = await store.get(key);
+  const authorization = authorizeFileWrite(
+    current,
+    input.credentialId,
+    input.observedEtag,
+  );
+  if (authorization.status !== "authorized") {
+    return authorization;
+  }
+
+  const state: FileWriteState = {
+    contentType: authorization.metadata.contentType,
+    expiresAt: nextExpiresAt(input.retention),
+    retention: input.retention,
+    size: authorization.current.size,
+    writeEtag: randomWriteEtag(),
+  };
+  await waitForNextUploadTime(authorization.current.uploaded);
+  const object = await store.put(key, authorization.current.body, {
+    onlyIf: exactUploadTime(authorization.current.uploaded),
+    httpMetadata: authorization.current.httpMetadata,
+    customMetadata: fileCustomMetadata(
+      authorization.metadata.credentialId,
+      authorization.metadata.originalFilename,
+      state,
+    ),
+  });
+  if (object === null) {
+    return { status: "stale" };
+  }
+
+  return {
+    status: "updated",
+    response: fileUploadResponse(input.opaqueId, input.publicOrigin, {
+      ...state,
+      size: object.size,
+    }),
+  };
+}
+
+export interface ExpirySweepOptions {
+  readonly afterTombstone?: (
+    candidate: R2Object,
+  ) => Promise<boolean | undefined>;
+  readonly beforeTombstone?: (
+    candidate: R2Object,
+  ) => Promise<boolean | undefined>;
+  readonly pageSize?: number;
+}
+
+export async function writeExpiryTombstone(
+  store: R2Bucket,
+  candidate: R2Object,
+): Promise<boolean> {
+  const current = await store.head(candidate.key);
+  if (
+    current === null ||
+    current.etag !== candidate.etag ||
+    current.uploaded.getTime() !== candidate.uploaded.getTime()
+  ) {
+    return false;
+  }
+
+  const tombstone = await store.put(candidate.key, new Uint8Array(), {
+    // R2 content ETags can recur for identical bytes. The listed ETag is
+    // checked above; upload time makes the conditional write version-exact.
+    onlyIf: exactUploadTime(candidate.uploaded),
+  });
+  return tombstone !== null;
+}
+
+export async function sweepExpiredFiles(
+  store: R2Bucket,
+  now: number,
+  options: ExpirySweepOptions = {},
+): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const page = await store.list({
+      cursor,
+      limit: options.pageSize ?? 1_000,
+      include: ["customMetadata"],
+    });
+
+    for (const candidate of page.objects) {
+      const retention = retentionSchema.safeParse(
+        candidate.customMetadata?.retention,
+      );
+      if (
+        !retention.success ||
+        retention.data === "keep" ||
+        candidate.customMetadata?.expiresAt === undefined ||
+        new Date(candidate.customMetadata.expiresAt).getTime() > now
+      ) {
+        continue;
+      }
+
+      if ((await options.beforeTombstone?.(candidate)) === false) {
+        return;
+      }
+      if (await writeExpiryTombstone(store, candidate)) {
+        if ((await options.afterTombstone?.(candidate)) === false) {
+          return;
+        }
+        await store.delete(candidate.key);
+      }
+    }
+
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor !== undefined);
 }
 
 export function matchesEtag(header: string | undefined, etag: string): boolean {

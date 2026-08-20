@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -19,9 +20,11 @@ import {
   fileUploadResponseSchema,
   localBindingSchema,
   opaqueIdSchema,
+  retentionSchema,
   type FileUploadResponse,
   type LocalBinding,
   type LocalBindingContent,
+  type Retention,
 } from "../shared/files.ts";
 import type {
   CreatedUploadKey,
@@ -267,11 +270,13 @@ function bindingChecksum(binding: LocalBindingContent): Promise<string> {
 
 async function localBindingPath(absolutePath: string): Promise<string> {
   return join(
-    stateRoot(),
-    "drop",
-    "bindings",
+    localBindingsDirectory(),
     `${await sha256Hex(absolutePath)}.json`,
   );
+}
+
+function localBindingsDirectory(): string {
+  return join(stateRoot(), "drop", "bindings");
 }
 
 async function readLocalBinding(
@@ -310,6 +315,36 @@ async function readLocalBinding(
   }
 }
 
+async function readLocalBindingByUrl(
+  url: string,
+): Promise<LocalBinding | undefined> {
+  let entries: string[];
+  try {
+    entries = await readdir(localBindingsDirectory());
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  for (const entry of entries) {
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(
+        await readFile(join(localBindingsDirectory(), entry), "utf8"),
+      );
+    } catch {
+      continue;
+    }
+    const parsed = localBindingSchema.safeParse(candidate);
+    if (parsed.success && parsed.data.url === url) {
+      return readLocalBinding(parsed.data.path);
+    }
+  }
+  return undefined;
+}
+
 function replacementApiPath(binding: LocalBinding): string {
   const opaqueId = opaqueIdSchema.parse(
     /^\/files\/([^/]+)$/.exec(new URL(binding.url).pathname)?.[1],
@@ -323,6 +358,7 @@ async function sendFile(
   uploadKey: string,
   environment: z.infer<typeof apiEnvironmentSchema>,
   binding: LocalBinding | undefined,
+  retention: Retention | undefined,
 ): Promise<Response> {
   const apiOrigin = new URL(environment.DROP_API_URL).origin;
   if (binding !== undefined) {
@@ -347,6 +383,7 @@ async function sendFile(
         "content-disposition": encodedFilename(basename(absolutePath)),
         "content-type": "application/octet-stream",
         ...(binding === undefined ? {} : { "if-match": binding.etag }),
+        ...(retention === undefined ? {} : { "drop-retention": retention }),
       },
       method: binding === undefined ? "POST" : "PUT",
     },
@@ -359,12 +396,22 @@ async function sendFile(
         1,
       );
     }
-    return sendFile(absolutePath, file, uploadKey, environment, undefined);
+    return sendFile(
+      absolutePath,
+      file,
+      uploadKey,
+      environment,
+      undefined,
+      retention,
+    );
   }
   return response;
 }
 
-async function uploadFile(pathInput: string): Promise<FileUploadResponse> {
+async function uploadFile(
+  pathInput: string,
+  retention: Retention | undefined,
+): Promise<FileUploadResponse> {
   const resolvedPath = resolve(pathInput);
   const file = Bun.file(resolvedPath);
   if (!(await file.exists())) {
@@ -381,6 +428,7 @@ async function uploadFile(pathInput: string): Promise<FileUploadResponse> {
     uploadKey,
     environment,
     binding,
+    retention,
   );
   if (!response.ok) {
     throw await responseError(response);
@@ -389,6 +437,123 @@ async function uploadFile(pathInput: string): Promise<FileUploadResponse> {
   const created = fileUploadResponseSchema.parse(await response.json());
   await writeLocalBinding(absolutePath, created);
   return created;
+}
+
+async function changeFileRetention(
+  pathOrUrl: string,
+  retention: Retention,
+): Promise<FileUploadResponse> {
+  const environment = readApiEnvironment();
+  const apiOrigin = new URL(environment.DROP_API_URL).origin;
+  const submittedUrl = z.url().safeParse(pathOrUrl);
+  let absolutePath: string;
+  let binding: LocalBinding | undefined;
+  if (submittedUrl.success) {
+    const url = new URL(submittedUrl.data);
+    const opaqueId = opaqueIdSchema.safeParse(
+      /^\/files\/([^/]+)$/.exec(url.pathname)?.[1],
+    );
+    if (
+      url.origin !== apiOrigin ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      !opaqueId.success
+    ) {
+      throw new CliError(
+        `The value is not an exact File Unlisted URL: ${pathOrUrl}`,
+        2,
+      );
+    }
+    binding = await readLocalBindingByUrl(url.href);
+    if (binding === undefined) {
+      throw new CliError(
+        `No local binding exists for this Unlisted URL: ${url.href}`,
+        1,
+      );
+    }
+    absolutePath = binding.path;
+  } else {
+    const resolvedPath = resolve(pathOrUrl);
+    const file = Bun.file(resolvedPath);
+    if (!(await file.exists())) {
+      throw new CliError(`The File does not exist: ${resolvedPath}`, 1);
+    }
+    absolutePath = await realpath(resolvedPath);
+    binding = await readLocalBinding(absolutePath);
+  }
+
+  if (binding === undefined) {
+    throw new CliError(
+      `No local binding exists for this path: ${absolutePath}`,
+      1,
+    );
+  }
+
+  const bindingOrigin = new URL(binding.url).origin;
+  if (bindingOrigin !== apiOrigin) {
+    throw new CliError(
+      `The local binding belongs to ${bindingOrigin}, not ${apiOrigin}.`,
+      1,
+    );
+  }
+
+  const response = await fetch(
+    new URL(replacementApiPath(binding), environment.DROP_API_URL),
+    {
+      body: JSON.stringify({ retention }),
+      headers: {
+        authorization: `Bearer ${await resolveUploadKey()}`,
+        "content-type": "application/json",
+        "if-match": binding.etag,
+      },
+      method: "PATCH",
+    },
+  );
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+
+  const changed = fileUploadResponseSchema.parse(await response.json());
+  await writeLocalBinding(absolutePath, changed);
+  return changed;
+}
+
+type UploadCommand = {
+  readonly json: boolean;
+  readonly path: string;
+  readonly retention: Retention | undefined;
+};
+
+function parseUploadCommand(arguments_: string[]): UploadCommand | undefined {
+  const path = arguments_[0];
+  if (path === undefined || path.startsWith("-")) {
+    return undefined;
+  }
+
+  let json = false;
+  let retention: Retention | undefined;
+  for (let index = 1; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (argument === "--json" && !json) {
+      json = true;
+      continue;
+    }
+    if (argument === "--retention" && retention === undefined) {
+      const parsed = retentionSchema.safeParse(arguments_[index + 1]);
+      if (!parsed.success) {
+        throw new CliError(
+          "--retention must be 7d, 30d, 90d, or keep.",
+          2,
+        );
+      }
+      retention = parsed.data;
+      index += 1;
+      continue;
+    }
+    return undefined;
+  }
+
+  return { json, path, retention };
 }
 
 async function runAdminCommand(arguments_: string[]): Promise<number> {
@@ -447,22 +612,48 @@ async function main(arguments_: string[]): Promise<number> {
   }
 
   if (
-    arguments_.length >= 1 &&
-    arguments_.length <= 2 &&
-    arguments_[0] !== undefined &&
-    !arguments_[0].startsWith("-") &&
-    (arguments_.length === 1 || arguments_[1] === "--json")
+    (arguments_.length === 3 ||
+      (arguments_.length === 4 && arguments_[3] === "--json")) &&
+    arguments_[0] === "retention" &&
+    arguments_[1] !== undefined
   ) {
-    const created = await uploadFile(arguments_[0]);
+    const retention = retentionSchema.safeParse(arguments_[2]);
+    if (!retention.success) {
+      throw new CliError(
+        "Retention Class must be 7d, 30d, 90d, or keep.",
+        2,
+      );
+    }
+    const changed = await changeFileRetention(
+      arguments_[1],
+      retention.data,
+    );
     console.log(
-      arguments_[1] === "--json"
+      arguments_[3] === "--json"
+        ? JSON.stringify(changed)
+        : changed.url,
+    );
+    return 0;
+  }
+
+  const uploadCommand = parseUploadCommand(arguments_);
+  if (uploadCommand !== undefined) {
+    const created = await uploadFile(
+      uploadCommand.path,
+      uploadCommand.retention,
+    );
+    console.log(
+      uploadCommand.json
         ? JSON.stringify(created)
         : created.url,
     );
     return 0;
   }
 
-  throw new CliError("Usage: drop <path> [--json] | drop auth set", 2);
+  throw new CliError(
+    "Usage: drop <path> [--retention 7d|30d|90d|keep] [--json] | drop retention <path-or-url> <retention> [--json] | drop auth set",
+    2,
+  );
 }
 
 try {

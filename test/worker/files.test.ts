@@ -116,6 +116,71 @@ describe("File creation and public reads", () => {
     expect(object?.etag).not.toBe(body.etag);
   });
 
+  test("creates Files with the selected Retention Class", async () => {
+    const uploadKey = await createUploadKey(workerd);
+
+    for (const retention of ["7d", "30d", "90d", "keep"] as const) {
+      const before = Date.now();
+      const response = await fetch(`${workerd.url}/api/files`, {
+        body: onePixelPng,
+        headers: {
+          ...uploadHeaders(uploadKey.key),
+          "drop-retention": retention,
+        },
+        method: "POST",
+      });
+      const after = Date.now();
+
+      expect(response.status).toBe(201);
+      const created = fileUploadResponseSchema.parse(await response.json());
+      expect(created.retention).toBe(retention);
+      if (retention === "keep") {
+        expect(created.expiresAt).toBeNull();
+      } else {
+        const days = Number.parseInt(retention, 10);
+        const expiresAt = new Date(created.expiresAt ?? "").getTime();
+        expect(expiresAt).toBeGreaterThanOrEqual(
+          before + days * 24 * 60 * 60 * 1_000,
+        );
+        expect(expiresAt).toBeLessThanOrEqual(
+          after + days * 24 * 60 * 60 * 1_000,
+        );
+      }
+
+      const opaqueId = new URL(created.url).pathname.slice("/files/".length);
+      const object = (await listContentObjects(workerd)).find(
+        ({ key }) => key === `files/${opaqueId}`,
+      );
+      expect(object?.customMetadata.retention).toBe(retention);
+      expect(object?.customMetadata.expiresAt).toBe(
+        created.expiresAt ?? undefined,
+      );
+    }
+  });
+
+  test("rejects an unknown Retention Class without storing a File", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const before = await listContentObjects(workerd);
+
+    const response = await fetch(`${workerd.url}/api/files`, {
+      body: onePixelPng,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "drop-retention": "forever",
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "invalid_request",
+        message: "Drop-Retention must be 7d, 30d, 90d, or keep.",
+      },
+    });
+    expect(await listContentObjects(workerd)).toHaveLength(before.length);
+  });
+
   test("Re-drops a File at the same URL with fresh bytes and metadata", async () => {
     const uploadKey = await createUploadKey(workerd);
     const upload = await fetch(`${workerd.url}/api/files`, {
@@ -175,6 +240,109 @@ describe("File creation and public reads", () => {
         retention: "keep",
         writeEtag: replaced.etag,
       },
+    });
+  });
+
+  test("preserves or changes Retention Class on Re-drop and resets its clock", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const upload = await fetch(`${workerd.url}/api/files`, {
+      body: onePixelPng,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "drop-retention": "7d",
+      },
+      method: "POST",
+    });
+    const created = fileUploadResponseSchema.parse(await upload.json());
+    const opaqueId = new URL(created.url).pathname.slice("/files/".length);
+    const replacementUrl = `${workerd.url}/api/files/${opaqueId}`;
+
+    const preservedResponse = await fetch(replacementUrl, {
+      body: onePixelGif,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "if-match": created.etag,
+      },
+      method: "PUT",
+    });
+
+    expect(preservedResponse.status).toBe(200);
+    const preserved = fileUploadResponseSchema.parse(
+      await preservedResponse.json(),
+    );
+    expect(preserved.retention).toBe("7d");
+    expect(new Date(preserved.expiresAt ?? 0).getTime()).toBeGreaterThan(
+      new Date(created.expiresAt ?? 0).getTime(),
+    );
+
+    const changedResponse = await fetch(replacementUrl, {
+      body: onePixelPng,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "drop-retention": "30d",
+        "if-match": preserved.etag,
+      },
+      method: "PUT",
+    });
+
+    expect(changedResponse.status).toBe(200);
+    const changed = fileUploadResponseSchema.parse(await changedResponse.json());
+    expect(changed.retention).toBe("30d");
+    expect(new Date(changed.expiresAt ?? 0).getTime()).toBeGreaterThan(
+      new Date(preserved.expiresAt ?? 0).getTime() + 22 * 24 * 60 * 60 * 1_000,
+    );
+    expect(changed.url).toBe(created.url);
+  });
+
+  test("changes retention without changing File content or its Unlisted URL", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const upload = await fetch(`${workerd.url}/api/files`, {
+      body: onePixelPng,
+      headers: uploadHeaders(uploadKey.key),
+      method: "POST",
+    });
+    const created = fileUploadResponseSchema.parse(await upload.json());
+    const opaqueId = new URL(created.url).pathname.slice("/files/".length);
+    const publicEtag = (await fetch(created.url, { method: "HEAD" })).headers.get(
+      "etag",
+    );
+    const before = Date.now();
+
+    const response = await fetch(`${workerd.url}/api/files/${opaqueId}`, {
+      body: JSON.stringify({ retention: "90d" }),
+      headers: {
+        authorization: `Bearer ${uploadKey.key}`,
+        "content-type": "application/json",
+        "if-match": created.etag,
+      },
+      method: "PATCH",
+    });
+
+    expect(response.status).toBe(200);
+    const changed = fileUploadResponseSchema.parse(await response.json());
+    expect(changed).toEqual({
+      ...created,
+      retention: "90d",
+      expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      etag: expect.stringMatching(/^"[^"]+"$/),
+    });
+    expect(changed.etag).not.toBe(created.etag);
+    expect(new Date(changed.expiresAt ?? 0).getTime()).toBeGreaterThanOrEqual(
+      before + 90 * 24 * 60 * 60 * 1_000,
+    );
+
+    const publicResponse = await fetch(created.url);
+    expect(publicResponse.headers.get("etag")).toBe(publicEtag);
+    expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+      onePixelPng,
+    );
+    const object = (await listContentObjects(workerd)).find(
+      ({ key }) => key === `files/${opaqueId}`,
+    );
+    expect(object?.customMetadata).toMatchObject({
+      retention: "90d",
+      expiresAt: changed.expiresAt,
+      writeEtag: changed.etag,
     });
   });
 
@@ -490,6 +658,104 @@ describe("File creation and public reads", () => {
     });
     expect(revokedCredential.status).toBe(401);
     expect(await listContentObjects(workerd)).toHaveLength(before.length);
+  });
+
+  test("scheduled expiry cursor-paginates metadata and deletes only due Files", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const create = (retention: "7d" | "keep") =>
+      fetch(`${workerd.url}/api/files`, {
+        body: onePixelPng,
+        headers: {
+          ...uploadHeaders(uploadKey.key),
+          "drop-retention": retention,
+        },
+        method: "POST",
+      }).then(async (response) =>
+        fileUploadResponseSchema.parse(await response.json()),
+      );
+    const [due, future, kept] = await Promise.all([
+      create("7d"),
+      create("7d"),
+      create("keep"),
+    ]);
+    const dueOpaqueId = new URL(due.url).pathname.slice("/files/".length);
+    const seeded = await fetch(
+      `${workerd.url}/__test/content-objects/${dueOpaqueId}/expiry`,
+      {
+        body: JSON.stringify({ expiresAt: new Date(0).toISOString() }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      },
+    );
+    expect(seeded.status).toBe(204);
+
+    const scheduled = await fetch(`${workerd.url}/__scheduled`);
+
+    expect({
+      body: await scheduled.text(),
+      status: scheduled.status,
+    }).toEqual({ body: "Ran scheduled event", status: 200 });
+    expect((await fetch(due.url)).status).toBe(404);
+    expect((await fetch(future.url)).status).toBe(200);
+    expect((await fetch(kept.url)).status).toBe(200);
+    const objects = await listContentObjects(workerd);
+    expect(objects.some(({ key }) => key === `files/${dueOpaqueId}`)).toBe(
+      false,
+    );
+  });
+
+  test("preserves a concurrent Re-drop that wins the expiry ETag race", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const upload = await fetch(`${workerd.url}/api/files`, {
+      body: onePixelPng,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "drop-retention": "7d",
+      },
+      method: "POST",
+    });
+    const created = fileUploadResponseSchema.parse(await upload.json());
+    const opaqueId = new URL(created.url).pathname.slice("/files/".length);
+    await fetch(`${workerd.url}/__test/content-objects/${opaqueId}/expiry`, {
+      body: JSON.stringify({ expiresAt: new Date(0).toISOString() }),
+      headers: { "content-type": "application/json" },
+      method: "PATCH",
+    });
+    const configured = await fetch(`${workerd.url}/__test/expiry-race`, {
+      body: JSON.stringify({ opaqueId, pause: "before-tombstone" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(configured.status).toBe(204);
+    const scheduled = await fetch(`${workerd.url}/__scheduled`);
+    const paused = await fetch(`${workerd.url}/__test/expiry-race/wait`);
+    expect(paused.status).toBe(204);
+
+    const replacement = await fetch(`${workerd.url}/api/files/${opaqueId}`, {
+      body: onePixelPng,
+      headers: {
+        ...uploadHeaders(uploadKey.key),
+        "if-match": created.etag,
+      },
+      method: "PUT",
+    });
+    const replaced = fileUploadResponseSchema.parse(await replacement.json());
+    const released = await fetch(`${workerd.url}/__test/expiry-race/release`, {
+      method: "POST",
+    });
+
+    expect(replacement.status).toBe(200);
+    expect(scheduled.status).toBe(200);
+    expect(released.status).toBe(204);
+    expect(replaced.retention).toBe("7d");
+    expect(new Date(replaced.expiresAt ?? 0).getTime()).toBeGreaterThan(
+      Date.now(),
+    );
+    const publicResponse = await fetch(created.url);
+    expect(publicResponse.status).toBe(200);
+    expect(new Uint8Array(await publicResponse.arrayBuffer())).toEqual(
+      onePixelPng,
+    );
   });
 
   test("rejects unsupported bytes with a stable 415 without storing them", async () => {
