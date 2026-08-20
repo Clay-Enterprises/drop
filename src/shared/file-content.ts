@@ -29,6 +29,12 @@ function readUint32BigEndian(bytes: Uint8Array, offset: number): number {
   );
 }
 
+function readUint16BigEndian(bytes: Uint8Array, offset: number): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
+    offset,
+  );
+}
+
 function isJpeg(bytes: Uint8Array): boolean {
   if (!startsWith(bytes, [0xff, 0xd8])) return false;
   let offset = 2;
@@ -231,7 +237,7 @@ function isWebp(bytes: Uint8Array): boolean {
         length < 10 ||
         (frameTag & 1) !== 0 ||
         partitionLength === 0 ||
-        10 + partitionLength > length ||
+        10 + partitionLength >= length ||
         bytes[payload + 3] !== 0x9d ||
         bytes[payload + 4] !== 0x01 ||
         bytes[payload + 5] !== 0x2a ||
@@ -329,7 +335,10 @@ function detectIsoContentType(bytes: Uint8Array): FileContentType | undefined {
     if (
       meta === undefined ||
       mediaData === undefined ||
-      mediaData.end - mediaData.payloadStart < 4 ||
+      mediaData.end - mediaData.payloadStart <= 4 ||
+      !bytes
+        .subarray(mediaData.payloadStart, mediaData.end)
+        .some((byte) => byte !== 0) ||
       meta.end - meta.payloadStart <= 4
     ) {
       return undefined;
@@ -346,23 +355,24 @@ function detectIsoContentType(bytes: Uint8Array): FileContentType | undefined {
         : parseIsoBoxes(
             metaBytes.subarray(properties.payloadStart, properties.end),
           );
-    const propertyTypes = new Set(propertyBoxes?.map(({ type }) => type));
-    return primaryItem !== undefined &&
-      primaryItem.end - primaryItem.payloadStart >= 6 &&
-      locations !== undefined &&
-      locations.end - locations.payloadStart > 8 &&
-      itemInfo !== undefined &&
-      itemInfo.end - itemInfo.payloadStart >= 6 &&
-      properties !== undefined &&
-      propertyTypes.has("ipco") &&
-      propertyTypes.has("ipma")
+    return validAvifMetadata(
+      metaBytes,
+      primaryItem,
+      locations,
+      itemInfo,
+      properties,
+      propertyBoxes,
+    )
       ? "image/avif"
       : undefined;
   }
   return brands.some((brand) => mp4Brands.has(brand)) &&
     movie !== undefined &&
     mediaData !== undefined &&
-    mediaData.end > mediaData.payloadStart &&
+    mediaData.end - mediaData.payloadStart > 8 &&
+    bytes
+      .subarray(mediaData.payloadStart, mediaData.end)
+      .some((byte) => byte !== 0) &&
     containsVideoTrack(bytes.subarray(movie.payloadStart, movie.end))
     ? "video/mp4"
     : undefined;
@@ -384,6 +394,90 @@ const mp4Brands = new Set([
   "dash",
   "M4V ",
 ]);
+
+function validAvifMetadata(
+  metaBytes: Uint8Array,
+  primaryItem: IsoBox | undefined,
+  locations: IsoBox | undefined,
+  itemInfo: IsoBox | undefined,
+  properties: IsoBox | undefined,
+  propertyBoxes: IsoBox[] | undefined,
+): boolean {
+  if (
+    primaryItem === undefined ||
+    primaryItem.end - primaryItem.payloadStart < 6 ||
+    readUint16BigEndian(metaBytes, primaryItem.payloadStart + 4) === 0 ||
+    locations === undefined ||
+    locations.end - locations.payloadStart <= 8 ||
+    itemInfo === undefined ||
+    itemInfo.end - itemInfo.payloadStart < 6 ||
+    properties === undefined
+  ) {
+    return false;
+  }
+
+  const locationVersion = metaBytes[locations.payloadStart]!;
+  const locationCount =
+    locationVersion < 2
+      ? readUint16BigEndian(metaBytes, locations.payloadStart + 6)
+      : readUint32BigEndian(metaBytes, locations.payloadStart + 6);
+  if (locationCount === 0) return false;
+
+  const infoVersion = metaBytes[itemInfo.payloadStart]!;
+  const infoCountSize = infoVersion === 0 ? 2 : 4;
+  const infoCount =
+    infoCountSize === 2
+      ? readUint16BigEndian(metaBytes, itemInfo.payloadStart + 4)
+      : readUint32BigEndian(metaBytes, itemInfo.payloadStart + 4);
+  const infoEntries = parseIsoBoxes(
+    metaBytes.subarray(itemInfo.payloadStart + 4 + infoCountSize, itemInfo.end),
+  );
+  const av1Item = infoEntries?.some(
+    (entry) =>
+      entry.type === "infe" &&
+      entry.end - entry.payloadStart >= 12 &&
+      metaBytes[itemInfo.payloadStart + 4 + infoCountSize + entry.payloadStart] ===
+        2 &&
+      ascii(
+        metaBytes,
+        itemInfo.payloadStart + 4 + infoCountSize + entry.payloadStart + 8,
+        4,
+      ) === "av01",
+  );
+  if (infoCount === 0 || !av1Item) return false;
+
+  const propertyTypes = new Set(propertyBoxes?.map(({ type }) => type));
+  const propertyContainer = propertyBoxes?.find(({ type }) => type === "ipco");
+  const associations = propertyBoxes?.find(({ type }) => type === "ipma");
+  if (
+    propertyContainer === undefined ||
+    associations === undefined ||
+    associations.end - associations.payloadStart < 8 ||
+    readUint32BigEndian(
+      metaBytes,
+      properties.payloadStart + associations.payloadStart + 4,
+    ) === 0
+  ) {
+    return false;
+  }
+  const propertyBytes = metaBytes.subarray(
+    properties.payloadStart + propertyContainer.payloadStart,
+    properties.payloadStart + propertyContainer.end,
+  );
+  const imageProperties = parseIsoBoxes(propertyBytes);
+  const imagePropertyTypes = new Set(imageProperties?.map(({ type }) => type));
+  const dimensions = imageProperties?.find(({ type }) => type === "ispe");
+  return (
+    propertyTypes.has("ipco") &&
+    propertyTypes.has("ipma") &&
+    imagePropertyTypes.has("pixi") &&
+    imagePropertyTypes.has("av1C") &&
+    dimensions !== undefined &&
+    dimensions.end - dimensions.payloadStart >= 12 &&
+    readUint32BigEndian(propertyBytes, dimensions.payloadStart + 4) > 0 &&
+    readUint32BigEndian(propertyBytes, dimensions.payloadStart + 8) > 0
+  );
+}
 
 function containsVideoTrack(movie: Uint8Array): boolean {
   const tracks = parseIsoBoxes(movie)?.filter(({ type }) => type === "trak");
@@ -431,33 +525,54 @@ function containsVideoTrack(movie: Uint8Array): boolean {
       ) {
         return false;
       }
-      const entries = parseIsoBoxes(
-        sampleTableBytes.subarray(description.payloadStart + 8, description.end),
+      const entryBytes = sampleTableBytes.subarray(
+        description.payloadStart + 8,
+        description.end,
+      );
+      const entries = parseIsoBoxes(entryBytes);
+      const validDescription =
+        entries?.some((entry) => {
+          if (entry.end - entry.payloadStart < 78) return false;
+          const width = readUint16BigEndian(entryBytes, entry.payloadStart + 24);
+          const height = readUint16BigEndian(entryBytes, entry.payloadStart + 26);
+          const codecBoxes = parseIsoBoxes(
+            entryBytes.subarray(entry.payloadStart + 78, entry.end),
+          );
+          const codecTypes = new Set(codecBoxes?.map(({ type }) => type));
+          return (
+            width > 0 &&
+            height > 0 &&
+            ["avcC", "hvcC", "av1C", "vpcC", "esds"].some((type) =>
+              codecTypes.has(type),
+            )
+          );
+        }) ?? false;
+      const sampleTables = parseIsoBoxes(sampleTableBytes);
+      const timing = sampleTables?.find(({ type }) => type === "stts");
+      const chunks = sampleTables?.find(({ type }) => type === "stsc");
+      const sizes = sampleTables?.find(({ type }) => type === "stsz");
+      const offsets = sampleTables?.find(
+        ({ type }) => type === "stco" || type === "co64",
       );
       return (
-        entries?.some((entry) => {
-          if (entry.end - entry.payloadStart < 28) return false;
-          const width =
-            (sampleTableBytes[
-              description.payloadStart + 8 + entry.payloadStart + 24
-            ]! <<
-              8) |
-            sampleTableBytes[
-              description.payloadStart + 8 + entry.payloadStart + 25
-            ]!;
-          const height =
-            (sampleTableBytes[
-              description.payloadStart + 8 + entry.payloadStart + 26
-            ]! <<
-              8) |
-            sampleTableBytes[
-              description.payloadStart + 8 + entry.payloadStart + 27
-            ]!;
-          return width > 0 && height > 0;
-        }) ?? false
+        validDescription &&
+        fullBoxCount(sampleTableBytes, timing, 4) > 0 &&
+        fullBoxCount(sampleTableBytes, chunks, 4) > 0 &&
+        fullBoxCount(sampleTableBytes, sizes, 8) > 0 &&
+        fullBoxCount(sampleTableBytes, offsets, 4) > 0
       );
     }) ?? false
   );
+}
+
+function fullBoxCount(
+  bytes: Uint8Array,
+  box: IsoBox | undefined,
+  countOffset: number,
+): number {
+  return box !== undefined && box.end - box.payloadStart >= countOffset + 4
+    ? readUint32BigEndian(bytes, box.payloadStart + countOffset)
+    : 0;
 }
 
 function mp4Signature(bytes: Uint8Array): boolean {
