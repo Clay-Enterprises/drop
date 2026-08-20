@@ -14,6 +14,9 @@ function isoBox(type: string, payload: Uint8Array): Uint8Array {
 const ftypPayload = (brand: string): Uint8Array =>
   new Uint8Array([...asciiBytes(brand), 0, 0, 0, 0, ...asciiBytes(brand)]);
 
+const joinBytes = (...parts: Uint8Array[]): Uint8Array =>
+  new Uint8Array(parts.flatMap((part) => Array.from(part)));
+
 export const signatureOnlyMp4 = new Uint8Array([
   ...isoBox("ftyp", ftypPayload("isom")),
   ...isoBox("moov", new Uint8Array()),
@@ -33,6 +36,45 @@ export const signatureOnlyWebp = (() => {
   bytes.set(asciiBytes("WEBPVP8 "), 8);
   new DataView(bytes.buffer).setUint32(16, 10, true);
   bytes.set([0, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0], 20);
+  return bytes;
+})();
+
+export const structuredOnlyMp4 = joinBytes(
+  isoBox("ftyp", ftypPayload("isom")),
+  isoBox(
+    "moov",
+    isoBox(
+      "trak",
+      isoBox(
+        "mdia",
+        isoBox(
+          "hdlr",
+          new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, ...asciiBytes("vide")]),
+        ),
+      ),
+    ),
+  ),
+  isoBox("mdat", new Uint8Array([0])),
+);
+
+export const structuredOnlyAvif = joinBytes(
+  isoBox("ftyp", ftypPayload("avif")),
+  isoBox(
+    "meta",
+    joinBytes(
+      new Uint8Array(4),
+      isoBox("pitm", new Uint8Array()),
+      isoBox("iloc", new Uint8Array()),
+      isoBox("iinf", new Uint8Array()),
+      isoBox("iprp", new Uint8Array()),
+    ),
+  ),
+  isoBox("mdat", new Uint8Array([0])),
+);
+
+export const structuredOnlyWebp = (() => {
+  const bytes = new Uint8Array(signatureOnlyWebp);
+  bytes[20] = 32;
   return bytes;
 })();
 

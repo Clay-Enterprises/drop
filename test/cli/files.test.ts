@@ -21,7 +21,7 @@ import { onePixelGif, onePixelPng } from "../fixtures.ts";
 import {
   onePixelAvif,
   onePixelJpeg,
-  signatureOnlyMp4,
+  structuredOnlyMp4,
   tinyMp4,
   tinyWebm,
   wideWebm,
@@ -369,10 +369,10 @@ describe("drop File", () => {
     expect(after.objects).toHaveLength(before.objects.length);
   });
 
-  test("rejects signature-only MP4 with --raw before upload", async () => {
+  test("rejects a structurally empty MP4 with --raw before upload", async () => {
     const directory = await temporaryDirectory();
     const path = join(directory, "broken.mp4");
-    await writeFile(path, signatureOnlyMp4);
+    await writeFile(path, structuredOnlyMp4);
     const uploadKey = await createUploadKey(workerd);
 
     const result = await runCli(workerd, [path, "--raw"], {

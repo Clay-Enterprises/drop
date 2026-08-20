@@ -231,7 +231,7 @@ function isWebp(bytes: Uint8Array): boolean {
         length < 10 ||
         (frameTag & 1) !== 0 ||
         partitionLength === 0 ||
-        partitionLength > length - 3 ||
+        10 + partitionLength > length ||
         bytes[payload + 3] !== 0x9d ||
         bytes[payload + 4] !== 0x01 ||
         bytes[payload + 5] !== 0x2a ||
@@ -334,14 +334,28 @@ function detectIsoContentType(bytes: Uint8Array): FileContentType | undefined {
     ) {
       return undefined;
     }
-    const metaBoxes = parseIsoBoxes(
-      bytes.subarray(meta.payloadStart + 4, meta.end),
-    );
-    const metaTypes = new Set(metaBoxes?.map(({ type }) => type));
-    return metaTypes.has("pitm") &&
-      metaTypes.has("iloc") &&
-      metaTypes.has("iinf") &&
-      metaTypes.has("iprp")
+    const metaBytes = bytes.subarray(meta.payloadStart + 4, meta.end);
+    const metaBoxes = parseIsoBoxes(metaBytes);
+    const primaryItem = metaBoxes?.find(({ type }) => type === "pitm");
+    const locations = metaBoxes?.find(({ type }) => type === "iloc");
+    const itemInfo = metaBoxes?.find(({ type }) => type === "iinf");
+    const properties = metaBoxes?.find(({ type }) => type === "iprp");
+    const propertyBoxes =
+      properties === undefined
+        ? undefined
+        : parseIsoBoxes(
+            metaBytes.subarray(properties.payloadStart, properties.end),
+          );
+    const propertyTypes = new Set(propertyBoxes?.map(({ type }) => type));
+    return primaryItem !== undefined &&
+      primaryItem.end - primaryItem.payloadStart >= 6 &&
+      locations !== undefined &&
+      locations.end - locations.payloadStart > 8 &&
+      itemInfo !== undefined &&
+      itemInfo.end - itemInfo.payloadStart >= 6 &&
+      properties !== undefined &&
+      propertyTypes.has("ipco") &&
+      propertyTypes.has("ipma")
       ? "image/avif"
       : undefined;
   }
@@ -384,10 +398,63 @@ function containsVideoTrack(movie: Uint8Array): boolean {
       const handler = parseIsoBoxes(mediaBytes)?.find(
         ({ type }) => type === "hdlr",
       );
+      if (
+        handler === undefined ||
+        handler.end - handler.payloadStart < 12 ||
+        ascii(mediaBytes, handler.payloadStart + 8, 4) !== "vide"
+      ) {
+        return false;
+      }
+      const mediaInfo = parseIsoBoxes(mediaBytes)?.find(
+        ({ type }) => type === "minf",
+      );
+      if (mediaInfo === undefined) return false;
+      const mediaInfoBytes = mediaBytes.subarray(
+        mediaInfo.payloadStart,
+        mediaInfo.end,
+      );
+      const sampleTable = parseIsoBoxes(mediaInfoBytes)?.find(
+        ({ type }) => type === "stbl",
+      );
+      if (sampleTable === undefined) return false;
+      const sampleTableBytes = mediaInfoBytes.subarray(
+        sampleTable.payloadStart,
+        sampleTable.end,
+      );
+      const description = parseIsoBoxes(sampleTableBytes)?.find(
+        ({ type }) => type === "stsd",
+      );
+      if (
+        description === undefined ||
+        description.end - description.payloadStart < 8 ||
+        readUint32BigEndian(sampleTableBytes, description.payloadStart + 4) === 0
+      ) {
+        return false;
+      }
+      const entries = parseIsoBoxes(
+        sampleTableBytes.subarray(description.payloadStart + 8, description.end),
+      );
       return (
-        handler !== undefined &&
-        handler.end - handler.payloadStart >= 12 &&
-        ascii(mediaBytes, handler.payloadStart + 8, 4) === "vide"
+        entries?.some((entry) => {
+          if (entry.end - entry.payloadStart < 28) return false;
+          const width =
+            (sampleTableBytes[
+              description.payloadStart + 8 + entry.payloadStart + 24
+            ]! <<
+              8) |
+            sampleTableBytes[
+              description.payloadStart + 8 + entry.payloadStart + 25
+            ]!;
+          const height =
+            (sampleTableBytes[
+              description.payloadStart + 8 + entry.payloadStart + 26
+            ]! <<
+              8) |
+            sampleTableBytes[
+              description.payloadStart + 8 + entry.payloadStart + 27
+            ]!;
+          return width > 0 && height > 0;
+        }) ?? false
       );
     }) ?? false
   );

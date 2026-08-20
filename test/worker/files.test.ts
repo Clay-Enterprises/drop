@@ -16,6 +16,9 @@ import {
   signatureOnlyAvif,
   signatureOnlyMp4,
   signatureOnlyWebp,
+  structuredOnlyAvif,
+  structuredOnlyMp4,
+  structuredOnlyWebp,
   tinyMp4,
   tinyWebm,
 } from "../media-fixtures.ts";
@@ -208,6 +211,9 @@ describe("File creation and public reads", () => {
       signatureOnlyMp4,
       signatureOnlyAvif,
       signatureOnlyWebp,
+      structuredOnlyMp4,
+      structuredOnlyAvif,
+      structuredOnlyWebp,
     ];
 
     for (const bytes of malformed) {
