@@ -2,9 +2,9 @@ import { Hono } from "hono";
 
 import { app as dropApp, type WorkerBindings } from "../src/worker/index.ts";
 import {
-  sweepExpiredFiles,
+  sweepExpiredDrops,
   writeExpiryTombstone,
-} from "../src/worker/files.ts";
+} from "../src/worker/drop-content.ts";
 import { authenticateUploadKey } from "../src/worker/upload-keys.ts";
 
 const app = new Hono<{ Bindings: WorkerBindings }>();
@@ -169,7 +169,7 @@ const worker: ExportedHandler<WorkerBindings> = {
     return app.fetch(request, environment, executionContext);
   },
   async scheduled(controller, environment) {
-    await sweepExpiredFiles(
+    await sweepExpiredDrops(
       environment.CONTENT_STORE,
       controller.scheduledTime,
       {

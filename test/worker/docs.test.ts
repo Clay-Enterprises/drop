@@ -94,7 +94,7 @@ describe("Doc creation and public reads", () => {
     <img src="data:image/png;base64,AA==" alt="Data image">
     <video src="https://cdn.example.com/demo.mp4" controls></video>
     <a href="https://example.com/details" target="_blank">Details</a>
-    <script>const label = "fetch"; document.querySelector("a")?.classList.add(label);</script>
+    <script>const fetch = "ready"; const values = [fetch]; const index = 0; document.querySelector("a")?.classList.add(values[index]);</script>
   </body>
 </html>`;
 
@@ -177,12 +177,32 @@ describe("Doc creation and public reads", () => {
         "<script>new Image().src = 'https://example.com/pixel.png'</script>",
       ],
       [
+        "aliased media mutation methods",
+        "<img><script>const image = document.querySelector('img'); const set = image.setAttribute; set.call(image, 'src', 'https://example.com/pixel.png')</script>",
+      ],
+      [
+        "aliased scripted link activation",
+        "<a href='https://example.com' target='_blank'>Open</a><script>const link = document.querySelector('a'); const activate = link.click; document.addEventListener('click', () => activate.call(link))</script>",
+      ],
+      [
+        "reflected network API access",
+        "<script>Object.getOwnPropertyDescriptor(globalThis, 'fetch').value('https://example.com')</script>",
+      ],
+      [
+        "scripted navigation",
+        "<script>document.location = 'https://example.com'</script>",
+      ],
+      [
         "escaped linked CSS",
         '<style>@\\69mport "https://example.com/app.css";</style>',
       ],
       [
         "CSS private-network image sets",
         '<style>body { background: image-set("https://127.0.0.1/a.png" 1x) }</style>',
+      ],
+      [
+        "vendor CSS private-network image sets",
+        '<style>body { background: -webkit-image-set("https://127.0.0.1/a.png" 1x) }</style>',
       ],
     ] as const;
 

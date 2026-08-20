@@ -4,8 +4,9 @@ import {
   type Expression,
   type MemberExpression,
 } from "acorn";
-import { full as walkScript } from "acorn-walk";
+import { fullAncestor as walkScript } from "acorn-walk";
 import { parse as parseCss, walk as walkCss } from "css-tree";
+import { analyze as analyzeScriptScopes } from "eslint-scope";
 
 import {
   docContentTypeSchema,
@@ -70,17 +71,26 @@ const forbiddenScriptIdentifiers = new Set([
   "cookieStore",
   "eval",
   "fetch",
+  "frames",
+  "globalThis",
   "indexedDB",
   "localStorage",
   "open",
+  "opener",
+  "parent",
   "sendBeacon",
   "serviceWorker",
   "sessionStorage",
+  "self",
+  "top",
+  "window",
 ]);
 
 const forbiddenScriptMembers = new Set([
   ...forbiddenScriptIdentifiers,
   "__proto__",
+  "__lookupGetter__",
+  "__lookupSetter__",
   "assign",
   "caches",
   "constructor",
@@ -89,11 +99,16 @@ const forbiddenScriptMembers = new Set([
   "cookieStore",
   "defineProperties",
   "defineProperty",
+  "defaultView",
   "fetch",
+  "getOwnPropertyDescriptor",
+  "getOwnPropertyDescriptors",
+  "getPrototypeOf",
   "indexedDB",
   "insertAdjacentHTML",
   "insertRule",
   "localStorage",
+  "location",
   "open",
   "outerHTML",
   "prototype",
@@ -102,8 +117,17 @@ const forbiddenScriptMembers = new Set([
   "serviceWorker",
   "sessionStorage",
   "setPrototypeOf",
+  "view",
   "write",
   "writeln",
+]);
+
+const inspectedScriptMethods = new Set([
+  "click",
+  "dispatchEvent",
+  "setAttribute",
+  "setAttributeNS",
+  "setProperty",
 ]);
 
 const networkAttributeNames = new Set([
@@ -293,7 +317,9 @@ function validateCss(
       node.type === "String" &&
       this.function !== null &&
       ["image", "image-set", "cross-fade"].includes(
-        decodeCssIdentifier(this.function.name).toLowerCase(),
+        decodeCssIdentifier(this.function.name)
+          .toLowerCase()
+          .replace(/^-(?:moz|ms|o|webkit)-/, ""),
       )
     ) {
       if (!allowRemoteMedia) {
@@ -326,9 +352,27 @@ function memberName(member: MemberExpression): string | undefined {
   return undefined;
 }
 
-function validateScriptMember(member: MemberExpression): void {
+function validateScriptMember(
+  member: MemberExpression,
+  parent: ScriptNode | undefined,
+): void {
   const name = memberName(member);
-  if (name === undefined || forbiddenScriptMembers.has(name)) {
+  if (forbiddenScriptMembers.has(name ?? "")) {
+    throw new InvalidDoc();
+  }
+  if (
+    inspectedScriptMethods.has(name ?? "") &&
+    (parent?.type !== "CallExpression" || parent.callee !== member)
+  ) {
+    throw new InvalidDoc();
+  }
+  if (
+    name === undefined &&
+    ((parent?.type === "CallExpression" && parent.callee === member) ||
+      (parent?.type === "NewExpression" && parent.callee === member) ||
+      (parent?.type === "AssignmentExpression" && parent.left === member) ||
+      (parent?.type === "UpdateExpression" && parent.argument === member))
+  ) {
     throw new InvalidDoc();
   }
 }
@@ -381,16 +425,31 @@ function validateScriptCall(node: Extract<ScriptNode, { type: "CallExpression" }
 }
 
 function validateScript(script: string): void {
-  const ast = parseScript(script, { ecmaVersion: "latest", sourceType: "script" });
-  walkScript(ast, (node) => {
+  const ast = parseScript(script, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+  });
+  const scopeManager = analyzeScriptScopes(
+    ast as unknown as import("estree").Program,
+    { ecmaVersion: 2024, sourceType: "script" },
+  );
+  const unresolvedIdentifiers = new WeakSet<object>(
+    scopeManager.globalScope?.through.map((reference) => reference.identifier),
+  );
+  walkScript(ast, (node, _state, ancestors) => {
+    const parent = ancestors.at(-2);
     if (node.type === "ImportExpression") {
       throw new InvalidDoc();
     }
-    if (node.type === "Identifier" && forbiddenScriptIdentifiers.has(node.name)) {
+    if (
+      node.type === "Identifier" &&
+      unresolvedIdentifiers.has(node) &&
+      forbiddenScriptIdentifiers.has(node.name)
+    ) {
       throw new InvalidDoc();
     }
     if (node.type === "MemberExpression") {
-      validateScriptMember(node);
+      validateScriptMember(node, parent);
     }
     if (node.type === "CallExpression") {
       validateScriptCall(node);

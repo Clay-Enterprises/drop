@@ -25,8 +25,8 @@ import {
   readUploadBody,
   replaceFile,
   serveFile,
-  sweepExpiredFiles,
 } from "./files.ts";
+import { sweepExpiredDrops } from "./drop-content.ts";
 import {
   authenticateUploadKey,
   createUploadKey,
@@ -765,7 +765,7 @@ const worker: ExportedHandler<WorkerBindings> = {
     return app.fetch(request, environment, executionContext);
   },
   async scheduled(controller, environment) {
-    await sweepExpiredFiles(
+    await sweepExpiredDrops(
       environment.CONTENT_STORE,
       controller.scheduledTime,
     );

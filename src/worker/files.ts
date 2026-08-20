@@ -8,12 +8,8 @@ import type { CredentialId } from "../shared/upload-keys.ts";
 import {
   changeDropRetention,
   createDrop,
-  matchesEtag,
-  parseByteRange,
   replaceDrop,
   serveDrop,
-  sweepExpiredDrops,
-  writeExpiryTombstone,
   type ChangeDropRetentionResult,
   type DropDescriptor,
   type ReplaceDropResult,
@@ -155,10 +151,3 @@ export function serveFile(
 ): Promise<Response> {
   return serveDrop(store, fileDescriptor, opaqueId, method, requestHeaders);
 }
-
-export {
-  matchesEtag,
-  parseByteRange,
-  sweepExpiredDrops as sweepExpiredFiles,
-  writeExpiryTombstone,
-};
