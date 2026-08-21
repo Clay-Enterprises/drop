@@ -64,6 +64,31 @@ const uploadKeyConfigurationSchema = z
   .object({ uploadKey: uploadKeySchema })
   .strict();
 
+const version = "0.1.0";
+
+const help = `Drop Files and Docs at public Unlisted URLs.
+
+Usage:
+  drop <path> [--retention 7d|30d|90d|keep] [--raw] [--json]
+  drop retention <path-or-url> <retention> [--json]
+  drop auth set
+  drop admin list [--kind file|doc] [--retention <retention>] [--owner <credential-id>] [--before <time>] [--after <time>] [--json]
+  drop admin delete <url> [--json]
+  drop admin keys create [--json]
+  drop admin keys list [--json]
+  drop admin keys revoke <credential-id> [--json]
+
+Options:
+  --help       Show this help.
+  --version    Show the release version.
+
+Environment:
+  DROP_UPLOAD_KEY   Override the stored Upload Key.
+  DROP_ADMIN_KEY    Authenticate admin commands.
+  DROP_API_URL      Override https://drop.clay.sh.
+  XDG_CONFIG_HOME   Override the configuration root.
+  XDG_STATE_HOME    Override the local binding root.`;
+
 class CliError extends Error {
   constructor(
     message: string,
@@ -961,6 +986,16 @@ async function runAdminCommand(arguments_: string[]): Promise<number> {
 }
 
 async function main(arguments_: string[]): Promise<number> {
+  if (arguments_.join(" ") === "--help") {
+    console.log(help);
+    return 0;
+  }
+
+  if (arguments_.join(" ") === "--version") {
+    console.log(`drop ${version}`);
+    return 0;
+  }
+
   if (arguments_[0] === "admin") {
     return runAdminCommand(arguments_);
   }

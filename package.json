@@ -1,12 +1,14 @@
 {
   "name": "drop",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "drop": "src/cli/index.ts"
   },
   "scripts": {
+    "build:release": "bun build --compile src/cli/index.ts",
     "dev": "wrangler dev",
     "drop": "bun run src/cli/index.ts",
     "test": "bun test",
