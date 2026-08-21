@@ -13,6 +13,12 @@ interface CommandResult {
   readonly stdout: string;
 }
 
+function reportDebugPhase(phase: string): void {
+  if (Bun.env.CI !== undefined) {
+    console.error(`[DEBUG-release-cli-7f3a] ${phase}`);
+  }
+}
+
 async function runExecutable(
   executable: string,
   arguments_: string[],
@@ -37,7 +43,9 @@ async function runExecutable(
 
 test("compiled release binary authenticates and drops a File", async () => {
   const directory = await mkdtemp(join(tmpdir(), "drop-release-cli-"));
+  reportDebugPhase("starting workerd");
   const workerd = await startWorkerd();
+  reportDebugPhase("workerd ready");
   try {
     const executable = join(
       directory,
@@ -53,6 +61,7 @@ test("compiled release binary authenticates and drops a File", async () => {
       new Response(build.stdout).text(),
     ]);
     expect(buildExitCode).toBe(0);
+    reportDebugPhase("binary built");
 
     const environment = {
       DROP_API_URL: workerd.url,
@@ -67,15 +76,18 @@ test("compiled release binary authenticates and drops a File", async () => {
     expect((await runExecutable(executable, ["--help"], environment)).stdout).toContain(
       "drop auth set",
     );
+    reportDebugPhase("startup commands passed");
 
     const keyResponse = await fetch(`${workerd.url}/api/admin/keys`, {
       headers: { authorization: `Bearer ${testAdminKey}` },
       method: "POST",
     });
     const uploadKey = createdUploadKeySchema.parse(await keyResponse.json());
+    reportDebugPhase("Upload Key created");
     expect(
       await runExecutable(executable, ["auth", "set"], environment, uploadKey.key),
     ).toEqual({ exitCode: 0, stderr: "Upload Key saved.\n", stdout: "" });
+    reportDebugPhase("authentication passed");
 
     const configurationPath = join(directory, "config", "drop", "config.json");
     expect(JSON.parse(await readFile(configurationPath, "utf8"))).toEqual({
@@ -95,8 +107,12 @@ test("compiled release binary authenticates and drops a File", async () => {
     expect(new Uint8Array(await (await fetch(url)).arrayBuffer())).toEqual(
       onePixelPng,
     );
+    reportDebugPhase("drop passed");
   } finally {
+    reportDebugPhase("stopping workerd");
     await workerd.stop();
+    reportDebugPhase("workerd stopped");
     await rm(directory, { force: true, recursive: true });
+    reportDebugPhase("cleanup complete");
   }
 }, 30_000);
