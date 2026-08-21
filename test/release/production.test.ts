@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-test("production bootstrap accepts a bucket with no CORS configuration", async () => {
+test("production bootstrap accepts empty CORS and an active custom domain", async () => {
   const directory = await mkdtemp(join(tmpdir(), "drop-bootstrap-"));
   const fakeBin = join(directory, "bin");
   await mkdir(fakeBin);
@@ -19,8 +19,22 @@ case "$*" in
     printf 'The CORS configuration does not exist. [code: 10059]\\n' >&2
     exit 1
     ;;
-  "wrangler r2 bucket dev-url disable drop-control --force")
-    printf 'reached dev-url configuration\\n'
+  "wrangler r2 bucket dev-url disable "*) exit 0 ;;
+  "wrangler r2 bucket domain list drop-control")
+    printf 'There are no custom domains connected to this bucket.\\n'
+    ;;
+  "wrangler r2 bucket domain list drop-content")
+    printf 'domain:            drop.clay.sh\\n'
+    ;;
+  "wrangler r2 bucket domain get drop-content --domain drop.clay.sh")
+    printf '%s\\n' \\
+      'domain:            drop.clay.sh' \\
+      'enabled:           Yes' \\
+      'ownership_status:  active' \\
+      'ssl_status:        active'
+    ;;
+  "wrangler deploy --secrets-file "*)
+    printf 'reached worker deployment\\n'
     exit 71
     ;;
   *) printf 'unexpected bunx call: %s\\n' "$*" >&2; exit 72 ;;
@@ -28,7 +42,15 @@ esac
 `,
   );
   await chmod(bunx, 0o700);
-  for (const command of ["bun", "curl", "open"]) {
+  const bun = join(fakeBin, "bun");
+  await writeFile(
+    bun,
+    `#!/usr/bin/env bash
+printf 'drop_a_%064d' 0
+`,
+  );
+  await chmod(bun, 0o700);
+  for (const command of ["curl", "open", "sleep"]) {
     const executable = join(fakeBin, command);
     await writeFile(executable, "#!/usr/bin/env bash\nexit 0\n");
     await chmod(executable, 0o700);
@@ -45,12 +67,12 @@ esac
       stderr: "pipe",
       stdout: "pipe",
     });
-    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\n`);
+    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\ny\n`);
     process.stdin.end();
     const stdout = await new Response(process.stdout).text();
     await process.exited;
 
-    expect(stdout).toContain("reached dev-url configuration");
+    expect(stdout).toContain("reached worker deployment");
   } finally {
     await rm(directory, { force: true, recursive: true });
   }

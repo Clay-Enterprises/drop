@@ -245,8 +245,8 @@ remove_custom_domains() {
 domain_is_active() {
   local output="$BOOTSTRAP_TEMP/domain.txt"
   bunx wrangler r2 bucket domain get drop-content --domain drop.clay.sh >"$output" 2>/dev/null || return 1
-  grep -Eqi 'ownership[^[:alnum:]]+active' "$output" &&
-    grep -Eqi 'ssl[^[:alnum:]]+active' "$output"
+  grep -Eqi '^[[:space:]]*ownership_status:[[:space:]]+active[[:space:]]*$' "$output" &&
+    grep -Eqi '^[[:space:]]*ssl_status:[[:space:]]+active[[:space:]]*$' "$output"
 }
 
 if [[ "${1:-}" == "--check" ]]; then
