@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 test("production bootstrap accepts empty CORS and an active custom domain", async () => {
   const directory = await mkdtemp(join(tmpdir(), "drop-bootstrap-"));
   const fakeBin = join(directory, "bin");
+  const onboardingMarker = join(directory, "workers-onboarded");
   await mkdir(fakeBin);
   const bunx = join(fakeBin, "bunx");
   await writeFile(
@@ -34,6 +35,10 @@ case "$*" in
       'ssl_status:        active'
     ;;
   "wrangler deploy --secrets-file "*)
+    if [[ ! -f "$ONBOARDING_MARKER" ]]; then
+      printf 'You need a workers.dev subdomain in order to proceed. [code: 10063]\\n' >&2
+      exit 1
+    fi
     printf 'reached worker deployment\\n'
     exit 71
     ;;
@@ -50,7 +55,17 @@ printf 'drop_a_%064d' 0
 `,
   );
   await chmod(bun, 0o700);
-  for (const command of ["curl", "open", "sleep"]) {
+  const open = join(fakeBin, "open");
+  await writeFile(
+    open,
+    `#!/usr/bin/env bash
+if [[ "$1" == */workers/onboarding ]]; then
+  touch "$ONBOARDING_MARKER"
+fi
+`,
+  );
+  await chmod(open, 0o700);
+  for (const command of ["curl", "sleep"]) {
     const executable = join(fakeBin, command);
     await writeFile(executable, "#!/usr/bin/env bash\nexit 0\n");
     await chmod(executable, 0o700);
@@ -60,6 +75,7 @@ printf 'drop_a_%064d' 0
     const process = Bun.spawn(["bash", "scripts/bootstrap.sh"], {
       env: {
         ...Bun.env,
+        ONBOARDING_MARKER: onboardingMarker,
         PATH: `${fakeBin}:${Bun.env.PATH ?? ""}`,
         XDG_CONFIG_HOME: directory,
       },
@@ -67,7 +83,7 @@ printf 'drop_a_%064d' 0
       stderr: "pipe",
       stdout: "pipe",
     });
-    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\ny\n`);
+    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\ny\ny\n`);
     process.stdin.end();
     const stdout = await new Response(process.stdout).text();
     await process.exited;

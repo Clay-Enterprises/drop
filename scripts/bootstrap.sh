@@ -349,6 +349,10 @@ for attempt in {1..40}; do
   note "waiting for drop.clay.sh ownership and TLS"
   sleep 15
 done
+say "Cloudflare requires an account workers.dev subdomain before it can create cron schedules. This Worker keeps its own workers.dev route disabled."
+open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/workers/onboarding"
+step "Open Workers & Pages. If Cloudflare prompts you, register the account's workers.dev subdomain. Do not enable the drop Worker's workers.dev route."
+pause "Press Enter after the Workers landing page has opened."
 confirm "Deploy the production Worker route and daily cron now?" || fail "Worker deployment cancelled."
 bunx wrangler deploy --secrets-file "$BOOTSTRAP_TEMP/admin.env"
 
