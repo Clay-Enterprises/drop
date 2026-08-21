@@ -8,6 +8,12 @@ interface CommandResult {
   readonly output: string;
 }
 
+interface SkillFrontmatter {
+  readonly description: string | undefined;
+  readonly fieldNames: readonly string[];
+  readonly name: string | undefined;
+}
+
 const repositoryRoot = resolve(".");
 
 async function runCommand(
@@ -23,17 +29,24 @@ async function runCommand(
   return { exitCode, output: `${stdout}${stderr}` };
 }
 
-function parseFrontmatter(contents: string): ReadonlyMap<string, string> {
-  const block = contents.match(/^---\n([\s\S]*?)\n---\n/);
-  if (block?.[1] === undefined) return new Map();
-  return new Map(
-    block[1].split("\n").flatMap((line) => {
+function parseFrontmatter(contents: string): SkillFrontmatter {
+  const frontmatterMatch = contents.match(/^---\n([\s\S]*?)\n---\n/);
+  if (frontmatterMatch?.[1] === undefined) {
+    return { description: undefined, fieldNames: [], name: undefined };
+  }
+  const fields = new Map(
+    frontmatterMatch[1].split("\n").flatMap((line) => {
       const separator = line.indexOf(":");
       return separator === -1
         ? []
         : [[line.slice(0, separator), line.slice(separator + 1).trim()]];
     }),
   );
+  return {
+    description: fields.get("description"),
+    fieldNames: [...fields.keys()],
+    name: fields.get("name"),
+  };
 }
 
 async function readSkill(name: string): Promise<string> {
@@ -100,9 +113,9 @@ describe("Agent Skills", () => {
     for (const name of ["drop", "html-communication"]) {
       const contents = await readSkill(name);
       const frontmatter = parseFrontmatter(contents);
-      expect(frontmatter.get("name")).toBe(name);
-      expect(frontmatter.get("description")?.length).toBeGreaterThan(20);
-      expect(frontmatter.size).toBe(2);
+      expect(frontmatter.name).toBe(name);
+      expect(frontmatter.description?.length).toBeGreaterThan(20);
+      expect(frontmatter.fieldNames).toEqual(["name", "description"]);
       expect(contents).not.toMatch(/Codex|Claude|plugin|marketplace|npm package/i);
     }
     expect(
@@ -125,12 +138,14 @@ describe("Agent Skills", () => {
 
     for (const required of [
       "command -v drop",
+      "run `drop <path>`",
       "drop auth set",
       "drop_upload_key",
       "unlisted url",
       "curl",
       "explicit",
       "never silently substitute",
+      "a failed cli invocation never authorizes another upload method",
       "local path identity",
       "keep the local artifact",
       "jpeg, png, webp, avif, gif, mp4, and webm",
@@ -143,16 +158,19 @@ describe("Agent Skills", () => {
     const contents = (await readSkill("html-communication")).toLowerCase();
 
     for (const required of [
-      "512 kb",
+      "512 kib",
       "#000",
       "responsive viewport",
       "semantic html",
       "inline css",
       "inline svg",
+      "data or https media",
+      "script-initiated network requests",
       "external or module scripts",
       "inline event handlers",
-      "private urls",
+      "private network urls",
       "same local path",
+      "re-drops the doc at its existing live url",
       "manual browser refresh",
       "command -v drop",
       "drop auth set",

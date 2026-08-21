@@ -13,16 +13,16 @@ Do not use it for HTML that ships as part of a product.
 
 ## Document
 
-Create a self-contained HTML file capped at 512 KiB, or 512 KB.
+Create a self-contained HTML file capped at 512 KiB (524,288 bytes).
 
 - Write it like a spec, not a landing page. Keep it dense and scannable, without a hero, decorative chrome, marketing voice, or em dashes.
 - Default to true black (`#000`), white primary text, and dark gray only for secondary areas or accents.
 - Make it mobile-readable with a responsive viewport and no fixed-width layout.
-- Use semantic HTML, inline CSS, inline SVG, and HTTPS or data URL images.
-- Use an inline classic script only when interactivity materially helps. Keep scripted Docs useful without JavaScript. The sandbox blocks storage, fetch, workers, frames, forms, and pop-ups.
+- Use semantic HTML, inline CSS, inline SVG, and data or HTTPS media.
+- Use an inline classic script only when interactivity materially helps. Keep scripted Docs useful without JavaScript. The sandbox blocks storage, script-initiated network requests, workers, frames, forms, and pop-ups.
 - In script-free files, give external links `target="_blank"` and `rel="noopener noreferrer"`. If any script exists, omit `target="_blank"`.
 
-Never include external or module scripts, inline event handlers, `javascript:` URLs, forms, frames, embeds, objects, applets, meta refresh, linked stylesheets, secrets, private URLs, or local file system paths.
+Never include external or module scripts, inline event handlers, `javascript:` URLs, forms, frames, embeds, objects, applets, meta refresh, linked stylesheets, secrets, private network URLs, or local file system paths.
 
 ## UI mocks
 
