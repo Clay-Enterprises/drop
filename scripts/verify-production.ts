@@ -14,7 +14,7 @@ import {
 const help = `Usage: bun run verify:production
 
 Runs destructive acceptance checks against the live Drop service, then removes
-every test Drop and restores the daily cron schedule.
+every test Drop. It does not change Terraform-managed infrastructure.
 
 Required environment variables:
   DROP_ADMIN_KEY       Live Admin Key
@@ -128,22 +128,6 @@ async function openBrowser(url: string): Promise<void> {
   }
 }
 
-async function deploySchedule(schedule: string): Promise<void> {
-  const arguments_ = ["bunx", "wrangler", "deploy", "--schedules", schedule];
-  const deployment = Bun.spawn(arguments_, {
-    stderr: "inherit",
-    stdout: "inherit",
-  });
-  const exitCode = await deployment.exited;
-  if (exitCode !== 0) {
-    throw new Error(
-      schedule === "0 0 * * *"
-        ? "Could not restore the daily production schedule."
-        : "Could not deploy the temporary expiry-test schedule.",
-    );
-  }
-}
-
 async function main(): Promise<void> {
   const environment = environmentSchema.parse(Bun.env);
   const origin = new URL(environment.DROP_ORIGIN).origin;
@@ -162,7 +146,6 @@ async function main(): Promise<void> {
   const r2Origin = `https://${environment.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
   const createdDrops: string[] = [];
   let disposableCredentialId: string | undefined;
-  let minuteScheduleDeployed = false;
 
   const apiFetch = (path: string, init?: RequestInit): Promise<Response> =>
     fetch(new URL(path, origin), init);
@@ -449,10 +432,32 @@ async function main(): Promise<void> {
       "R2 expiry timestamp update",
     );
 
-    say("temporarily deploying a once-per-minute sweep; the daily schedule will be restored");
-    await deploySchedule("* * * * *");
-    minuteScheduleDeployed = true;
-    const deadline = Date.now() + 150_000;
+    const expiryInventory = await parseResponse(
+      await apiFetch("/api/files", { headers: adminHeaders }),
+      200,
+      "Admin expiry metadata check",
+      dropInventoryPageSchema,
+    );
+    const expiryEntry = expiryInventory.drops.find(
+      ({ url }) => url === expiryFile.url,
+    );
+    assert(
+      expiryEntry?.expiresAt !== null &&
+        expiryEntry?.expiresAt !== undefined &&
+        new Date(expiryEntry.expiresAt).getTime() <= Date.now(),
+      "The Worker could not see the shortened R2 expiry timestamp.",
+    );
+
+    say("running the expiry sweep through the Admin interface");
+    await expectStatus(
+      await apiFetch("/api/admin/sweep", {
+        method: "POST",
+        headers: adminHeaders,
+      }),
+      204,
+      "Admin expiry sweep",
+    );
+    const deadline = Date.now() + 30_000;
     let expired = false;
     while (Date.now() < deadline) {
       const response = await fetch(expiryFile.url, { cache: "no-store" });
@@ -460,10 +465,10 @@ async function main(): Promise<void> {
         expired = true;
         break;
       }
-      say("waiting for the next scheduled sweep");
-      await Bun.sleep(10_000);
+      say("waiting for the expired File to disappear from the public origin");
+      await Bun.sleep(2_000);
     }
-    assert(expired, "The shortened expiry timestamp survived the scheduled sweep.");
+    assert(expired, "The shortened expiry timestamp survived the Admin sweep.");
     const expiryIndex = createdDrops.indexOf(expiryFile.url);
     assert(expiryIndex >= 0, "Expiry File was not registered for cleanup.");
     createdDrops.splice(expiryIndex, 1);
@@ -471,14 +476,6 @@ async function main(): Promise<void> {
     say("all live acceptance checks passed");
   } finally {
     const cleanupErrors: string[] = [];
-    if (minuteScheduleDeployed) {
-      say("restoring the daily production schedule");
-      await deploySchedule("0 0 * * *").catch((error: unknown) => {
-        cleanupErrors.push(
-          error instanceof Error ? error.message : String(error),
-        );
-      });
-    }
     if (disposableCredentialId !== undefined) {
       const response = await apiFetch(
         `/api/admin/keys/${disposableCredentialId}`,

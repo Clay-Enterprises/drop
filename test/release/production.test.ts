@@ -8,8 +8,9 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
   ) as { scripts?: Record<string, string> };
 
   expect(manifest.scripts?.bootstrap).toBe("bash scripts/bootstrap.sh");
+  expect(manifest.scripts?.provision).toBe("bash scripts/bootstrap.sh");
   expect(manifest.scripts?.["verify:production"]).toBe(
-    "bun run scripts/verify-production.ts",
+    "bash scripts/bootstrap.sh --verify",
   );
   expect(manifest.scripts?.dev).toBe(
     "wrangler dev --host 127.0.0.1:8787",
@@ -17,6 +18,16 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
 
   const syntax = Bun.spawnSync(["bash", "-n", "scripts/bootstrap.sh"]);
   expect(syntax.exitCode).toBe(0);
+
+  const bootstrap = await readFile(
+    resolve("scripts/bootstrap.sh"),
+    "utf8",
+  );
+  expect(bootstrap.indexOf('stage "Production confirmation"')).toBeLessThan(
+    bootstrap.indexOf(
+      '(( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed."',
+    ),
+  );
 
   const check = Bun.spawnSync(["bash", "scripts/bootstrap.sh", "--check"]);
   expect(check.exitCode).toBe(0);
@@ -33,6 +44,14 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
   expect(help.exitCode).toBe(0);
   expect(help.stdout.toString()).toContain("DROP_ADMIN_KEY");
   expect(help.stdout.toString()).toContain("R2_ACCESS_KEY_ID");
+
+  const verifier = await readFile(
+    resolve("scripts/verify-production.ts"),
+    "utf8",
+  );
+  expect(verifier).toContain('apiFetch("/api/admin/sweep"');
+  expect(verifier).not.toContain("wrangler");
+  expect(verifier).not.toContain("* * * * *");
 });
 
 test("Terraform owns production infrastructure and Wrangler owns Worker code", async () => {

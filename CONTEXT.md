@@ -45,5 +45,5 @@ An independently revocable credential that grants permission to create Files and
 _Avoid_: API key, user account, login
 
 **Admin Key**:
-The operator credential that grants permission to inspect inventory and delete Files and Docs.
+The operator credential that grants permission to inspect inventory, delete Files and Docs, manage Upload Keys, and run the expiry sweep.
 _Avoid_: Upload key, Cloudflare credential

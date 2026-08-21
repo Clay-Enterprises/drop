@@ -10,6 +10,6 @@ This Terraform root manages the steady-state Cloudflare infrastructure for `drop
 
 The existing `drop-content` custom domain is read and asserted instead of managed. Cloudflare's provider cannot import an existing R2 custom-domain resource. Small idempotent helpers delete CORS, keep `drop-control` free of custom domains, and register the account-level `workers.dev` name because Cloudflare rejects an empty CORS resource and the other absent/account-level states are not represented by the provider.
 
-Run `bun run bootstrap` from the repository root for the complete, guarded workflow. It supplies the token through `CLOUDFLARE_API_TOKEN`, saves a plan for review, and asks before applying it. Do not put tokens in `.tfvars` files or command-line arguments.
+Run `bun run provision` from the repository root for the guarded provisioning workflow. It supplies the token through `CLOUDFLARE_API_TOKEN`, saves a plan for review, and asks before applying it. Run `bun run verify:production` afterward. Do not put tokens in `.tfvars` files or command-line arguments.
 
 Terraform state and plans are local and ignored. The import blocks adopt resources created before Terraform took ownership, so a fresh checkout converges without deleting or recreating them. Wrangler deliberately does not declare routes or schedules; it owns Worker code and bindings while Terraform owns the triggers.

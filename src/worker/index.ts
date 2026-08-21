@@ -344,6 +344,11 @@ app.delete("/api/admin/keys/:credentialId", async (context) => {
   return context.body(null, 204);
 });
 
+app.post("/api/admin/sweep", async (context) => {
+  await sweepExpiredDrops(context.env.CONTENT_STORE, Date.now());
+  return context.body(null, 204);
+});
+
 app.get("/api/files", async (context) => {
   const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
   if (context.req.header("Authorization") !== `Bearer ${adminKey}`) {

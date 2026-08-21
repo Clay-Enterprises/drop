@@ -85,6 +85,7 @@ DELETE /api/docs/:id
 POST /api/admin/keys
 GET /api/admin/keys
 DELETE /api/admin/keys/:credential-id
+POST /api/admin/sweep
 GET /files/:id
 HEAD /files/:id
 GET /docs/:id
@@ -107,7 +108,7 @@ Use `/api/docs` for a Doc. Creation returns JSON containing `url`, `kind`, `cont
 
 ## Security and operations
 
-Upload Keys can create content and Re-drop only content created by that exact key. Admin Keys can list and delete Drops and manage Upload Keys, but cannot Re-drop content. Public reads require no credential. See [SECURITY.md](SECURITY.md) for the trust model and responsible disclosure process.
+Upload Keys can create content and Re-drop only content created by that exact key. Admin Keys can list and delete Drops, manage Upload Keys, and run the expiry sweep, but cannot Re-drop content. Public reads require no credential. See [SECURITY.md](SECURITY.md) for the trust model and responsible disclosure process.
 
 Drop stores content and metadata in Cloudflare R2 Standard storage. Operators pay for stored GB-months plus Class A writes and lists and Class B reads. Direct R2 egress has no data transfer charge under Cloudflare's current pricing. API writes and admin requests also consume Workers requests and CPU time. Check Cloudflare's current [R2 pricing](https://developers.cloudflare.com/r2/pricing/) and [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) before operating a deployment.
 
@@ -122,20 +123,28 @@ Operational limits are intentionally plain:
 
 ### Provision production
 
-From a clean checkout, run the guided Cloudflare bootstrap:
+From a clean checkout, provision Cloudflare and deploy the Worker:
 
 ```console
 bun install --frozen-lockfile
-bun run bootstrap
+bun run provision
 ```
 
-The wizard asks for one temporary, scoped Cloudflare API token, shows the Terraform plan, and waits for confirmation before applying it. Terraform adopts the resources from earlier runs and owns the R2 buckets, public-access settings, Worker route and cron, cache bypass, response headers, and disabled Worker subdomains. Wrangler owns only the Worker code, bindings, observability configuration, and Admin Key.
+The provisioning wizard asks for one temporary, scoped Cloudflare API token, shows the Terraform plan, and waits for confirmation before applying it. Terraform adopts the resources from earlier runs and owns the R2 buckets, public-access settings, Worker route and cron, cache bypass, response headers, and disabled Worker subdomains. Wrangler owns only the Worker code, bindings, observability configuration, and Admin Key.
 
-The bootstrap creates its bucket-scoped R2 verification credential through the API and revokes it automatically, including after a failed acceptance run. It pauses only for the browser refresh check, final log inspection, and revocation of the provisioning token. It configures the initial Upload Key in the local CLI and stores the Admin Key at `$XDG_CONFIG_HOME/drop/admin-key`, or `~/.config/drop/admin-key` when `XDG_CONFIG_HOME` is unset, with mode `0600`.
+Provisioning stops after it configures the initial Upload Key in the local CLI. It stores the Admin Key at `$XDG_CONFIG_HOME/drop/admin-key`, or `~/.config/drop/admin-key` when `XDG_CONFIG_HOME` is unset, with mode `0600`.
+
+Run live acceptance separately:
+
+```console
+bun run verify:production
+```
+
+The verification wizard reads the local Admin and Upload Keys, creates a bucket-scoped two-hour R2 credential, and revokes that credential automatically, including after a failed run. It changes only temporary test Drops and credentials. It does not run Terraform, deploy Worker code, or change the daily cron. It pauses for the browser refresh check, final log inspection, and revocation of the temporary Cloudflare token.
 
 The Terraform root is in [`infra/terraform`](infra/terraform/README.md). Its state files and saved plans are intentionally local and ignored; committed import blocks adopt the production resources from a fresh checkout.
 
-`bun run verify:production` reruns the destructive live acceptance checks when supplied the environment variables shown by `bun run verify:production --help`. The verifier cleans up its test Drops and restores the daily schedule before it exits.
+`bun run bootstrap` remains an alias for `bun run provision`.
 
 ## Develop
 

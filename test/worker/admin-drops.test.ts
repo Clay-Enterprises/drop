@@ -232,4 +232,33 @@ describe("Drop administration", () => {
     expect(replaceResponse.status).toBe(401);
     expect((await fetch(created.url)).status).toBe(200);
   });
+
+  test("lets only the Admin Key run the expiry sweep", async () => {
+    const owner = await createUploadKey(workerd);
+    const created = await createFile(workerd, owner.key);
+    const opaqueId = new URL(created.url).pathname.slice("/files/".length);
+    const seeded = await fetch(
+      `${workerd.url}/__test/content-objects/${opaqueId}/expiry`,
+      {
+        body: JSON.stringify({ expiresAt: new Date(0).toISOString() }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      },
+    );
+    expect(seeded.status).toBe(204);
+
+    const unauthorized = await fetch(`${workerd.url}/api/admin/sweep`, {
+      method: "POST",
+    });
+    expect(unauthorized.status).toBe(401);
+    expect((await fetch(created.url)).status).toBe(200);
+
+    const swept = await fetch(`${workerd.url}/api/admin/sweep`, {
+      headers: adminHeaders,
+      method: "POST",
+    });
+    expect(swept.status).toBe(204);
+    expect(await swept.text()).toBe("");
+    expect((await fetch(created.url)).status).toBe(404);
+  });
 });

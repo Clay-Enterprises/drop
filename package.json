@@ -12,9 +12,10 @@
     "build:release": "bun build --compile src/cli/index.ts",
     "dev": "wrangler dev --host 127.0.0.1:8787",
     "drop": "bun run src/cli/index.ts",
+    "provision": "bash scripts/bootstrap.sh",
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.bun.json",
-    "verify:production": "bun run scripts/verify-production.ts"
+    "verify:production": "bash scripts/bootstrap.sh --verify"
   },
   "dependencies": {
     "acorn": "^8.18.0",

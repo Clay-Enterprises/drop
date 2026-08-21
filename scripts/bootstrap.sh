@@ -184,7 +184,7 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=6
+TOTAL_STAGES=0
 
 fail() {
   printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2
@@ -218,9 +218,28 @@ if [[ "${1:-}" == "--check" ]]; then
   exit 0
 fi
 
+MODE="provision"
+if [[ "${1:-}" == "--verify" ]]; then
+  MODE="verify"
+  shift
+fi
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  if [[ "$MODE" == "verify" ]]; then
+    printf 'Usage: bun run verify:production\n\nRuns live acceptance without changing Terraform-managed infrastructure.\n'
+  else
+    printf 'Usage: bun run provision\n\nProvisions Cloudflare, deploys the Worker, and creates the initial Upload Key.\n'
+  fi
+  exit 0
+fi
+
+[[ $# -eq 0 ]] || fail "Unknown argument: $1"
+
 require_command bun
-require_command bunx
-require_command terraform
+if [[ "$MODE" == "provision" ]]; then
+  require_command bunx
+  require_command terraform
+fi
 
 umask 077
 BOOTSTRAP_TEMP=$(mktemp -d)
@@ -237,10 +256,82 @@ cleanup_bootstrap() {
 
 trap cleanup_bootstrap EXIT
 
-banner "Provision drop.clay.sh with Terraform"
-
 CLOUDFLARE_ACCOUNT_ID="6e0cccdd787599d868ec17156c8d372f"
 export CLOUDFLARE_ACCOUNT_ID
+DROP_CONFIG_DIRECTORY="${XDG_CONFIG_HOME:-${HOME}/.config}/drop"
+ADMIN_KEY_FILE="$DROP_CONFIG_DIRECTORY/admin-key"
+UPLOAD_KEY_CONFIG="$DROP_CONFIG_DIRECTORY/config.json"
+
+if [[ "$MODE" == "verify" ]]; then
+  TOTAL_STAGES=3
+  banner "Verify drop.clay.sh production"
+
+  stage "Cloudflare verification token"
+  say "Verification uses this token only to create and revoke a two-hour, drop-content-only credential."
+  note "Reuse the active provisioning token, or create a token with Account API Tokens Edit for the clay.sh account."
+  open_url "https://dash.cloudflare.com/profile/api-tokens"
+  ask_secret CLOUDFLARE_API_TOKEN "Temporary Cloudflare API token:"
+  [[ -n "$CLOUDFLARE_API_TOKEN" ]] || fail "The Cloudflare API token is required."
+  export CLOUDFLARE_API_TOKEN
+  # JavaScript reads the token from process.env at runtime.
+  # shellcheck disable=SC2016
+  bun -e 'const response = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", { headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` } }); const body = await response.json(); if (!response.ok || body.success !== true) process.exit(1)' ||
+    fail "Cloudflare rejected that API token."
+
+  stage "Live acceptance"
+  say "This creates temporary Drops and credentials. It does not run Terraform, deploy Worker code, or change Worker triggers."
+  [[ -f "$ADMIN_KEY_FILE" ]] || fail "Run bun run provision first; $ADMIN_KEY_FILE does not exist."
+  ADMIN_KEY=$(<"$ADMIN_KEY_FILE")
+  [[ "$ADMIN_KEY" =~ ^drop_a_[0-9a-f]{64}$ ]] || fail "$ADMIN_KEY_FILE does not contain a valid Admin Key."
+  [[ -f "$UPLOAD_KEY_CONFIG" ]] || fail "Run bun run provision first; the local CLI has no Upload Key."
+  UPLOAD_KEY=$(bun -e 'const path = process.argv[1]; try { const value = await Bun.file(path).json(); if (typeof value.uploadKey === "string") process.stdout.write(value.uploadKey); } catch {}' "$UPLOAD_KEY_CONFIG")
+  [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] || fail "$UPLOAD_KEY_CONFIG does not contain a valid Upload Key."
+
+  bun run scripts/r2-verification-token.ts create "$BOOTSTRAP_TEMP/r2.env"
+  # The token helper creates this env file immediately before it is sourced.
+  # shellcheck disable=SC1091
+  source "$BOOTSTRAP_TEMP/r2.env"
+  export R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+  set +e
+  DROP_ADMIN_KEY="$ADMIN_KEY" \
+  DROP_UPLOAD_KEY="$UPLOAD_KEY" \
+  R2_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+  R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+  R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+  bun run scripts/verify-production.ts
+  ACCEPTANCE_STATUS=$?
+  set -e
+
+  bun run scripts/r2-verification-token.ts revoke "$R2_TOKEN_ID"
+  R2_TOKEN_ID=""
+  unset R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+
+  stage "Production confirmation"
+  CONFIRMATION_STATUS=0
+  if (( ACCEPTANCE_STATUS == 0 )); then
+    say "Inspect the custom Drop events from the acceptance run."
+    open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/workers/services/view/drop/production/observability/logs"
+    step "Open a recent custom event. Its application fields must be timestamp, credentialId, url, kind, size, retention, outcome, and status only."
+    step "Confirm there is no Worker Logpush or Tail Worker sink and no application rate limiter."
+    confirm "Do the logs and production settings match?" || CONFIRMATION_STATUS=$?
+  else
+    warn "Live acceptance failed. The short-lived R2 token was revoked safely."
+  fi
+  say "The temporary Cloudflare token is no longer needed."
+  open_url "https://dash.cloudflare.com/profile/api-tokens"
+  step "Revoke 'Drop Terraform bootstrap', or the verification token you created."
+  confirm "Has the temporary Cloudflare token been revoked?" || fail "Revoke the temporary Cloudflare token before completing verification."
+
+  (( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed."
+  (( CONFIRMATION_STATUS == 0 )) || fail "Production log verification was not confirmed."
+
+  unset ADMIN_KEY UPLOAD_KEY CLOUDFLARE_API_TOKEN
+  finish
+  exit 0
+fi
+
+TOTAL_STAGES=5
+banner "Provision drop.clay.sh with Terraform"
 
 stage "Cloudflare provisioning token"
 say "Terraform needs one temporary token. It stays in this process and is never written to disk or Terraform state."
@@ -253,13 +344,13 @@ step "Set the token to expire tomorrow, create it, and copy its value."
 ask_secret CLOUDFLARE_API_TOKEN "Temporary Cloudflare API token:"
 [[ -n "$CLOUDFLARE_API_TOKEN" ]] || fail "The Cloudflare API token is required."
 export CLOUDFLARE_API_TOKEN
+# JavaScript reads the token from process.env at runtime.
+# shellcheck disable=SC2016
 bun -e 'const response = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", { headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` } }); const body = await response.json(); if (!response.ok || body.success !== true) process.exit(1)' ||
   fail "Cloudflare rejected that API token."
 
 stage "Admin Key"
 say "The Admin Key is stored outside the repository and prepared as a Worker secret."
-DROP_CONFIG_DIRECTORY="${XDG_CONFIG_HOME:-${HOME}/.config}/drop"
-ADMIN_KEY_FILE="$DROP_CONFIG_DIRECTORY/admin-key"
 mkdir -p "$DROP_CONFIG_DIRECTORY"
 chmod 700 "$DROP_CONFIG_DIRECTORY"
 if [[ -f "$ADMIN_KEY_FILE" ]]; then
@@ -286,54 +377,23 @@ say "Wrangler uploads only Worker code, bindings, observability settings, and th
 confirm "Deploy the production Worker now?" || fail "Worker deployment cancelled."
 bunx wrangler deploy --secrets-file "$BOOTSTRAP_TEMP/admin.env"
 
-stage "Upload Key and live acceptance"
-say "This creates the initial Upload Key and a two-hour, drop-content-only verification credential, then exercises the live service."
-bun run scripts/r2-verification-token.ts create "$BOOTSTRAP_TEMP/r2.env"
-source "$BOOTSTRAP_TEMP/r2.env"
-export R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
-set +e
-(
-  set -e
-  UPLOAD_KEY_CONFIG="$DROP_CONFIG_DIRECTORY/config.json"
-  UPLOAD_KEY=""
-  if [[ -f "$UPLOAD_KEY_CONFIG" ]]; then
-    UPLOAD_KEY=$(bun -e 'const path = process.argv[1]; try { const value = await Bun.file(path).json(); if (typeof value.uploadKey === "string") process.stdout.write(value.uploadKey); } catch {}' "$UPLOAD_KEY_CONFIG")
-  fi
-  KEY_LIST=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys list --json)
-  if [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] && grep -Fq "${UPLOAD_KEY:7:32}" <<<"$KEY_LIST"; then
-    note "using the Upload Key already configured in the local CLI"
-  else
-    UPLOAD_KEY=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys create)
-  fi
-  [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] || fail "The live Admin interface returned an invalid Upload Key."
-  printf '%s' "$UPLOAD_KEY" | bun run src/cli/index.ts auth set
-  DROP_ADMIN_KEY="$ADMIN_KEY" \
-  DROP_UPLOAD_KEY="$UPLOAD_KEY" \
-  R2_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
-  R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
-  R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-  bun run verify:production
-)
-ACCEPTANCE_STATUS=$?
-set -e
+stage "Initial Upload Key"
+say "The Worker creates the initial Upload Key and stores it in the local Drop CLI configuration."
+UPLOAD_KEY=""
+if [[ -f "$UPLOAD_KEY_CONFIG" ]]; then
+  UPLOAD_KEY=$(bun -e 'const path = process.argv[1]; try { const value = await Bun.file(path).json(); if (typeof value.uploadKey === "string") process.stdout.write(value.uploadKey); } catch {}' "$UPLOAD_KEY_CONFIG")
+fi
+KEY_LIST=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys list --json)
+if [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] && grep -Fq "${UPLOAD_KEY:7:32}" <<<"$KEY_LIST"; then
+  note "using the Upload Key already configured in the local CLI"
+else
+  UPLOAD_KEY=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys create)
+fi
+[[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] || fail "The live Admin interface returned an invalid Upload Key."
+printf '%s' "$UPLOAD_KEY" | bun run src/cli/index.ts auth set
 
-bun run scripts/r2-verification-token.ts revoke "$R2_TOKEN_ID"
-R2_TOKEN_ID=""
-unset R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
-(( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed; the temporary token was revoked safely."
-
-stage "Production confirmation"
-say "Inspect the custom Drop events from the acceptance run."
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/workers/services/view/drop/production/observability/logs"
-step "Open a recent custom event. Its application fields must be timestamp, credentialId, url, kind, size, retention, outcome, and status only."
-step "Confirm there is no Worker Logpush or Tail Worker sink and no application rate limiter."
-confirm "Do the logs and production settings match?" || fail "Production log verification was not confirmed."
-say "The provisioning token is no longer needed."
-open_url "https://dash.cloudflare.com/profile/api-tokens"
-step "Revoke 'Drop Terraform bootstrap'."
-confirm "Has the Terraform bootstrap token been revoked?" || fail "Revoke the provisioning token before completing bootstrap."
-
-say "The initial Upload Key is configured in the local CLI."
+say "Provisioning is complete. Run bun run verify:production next."
+note "Keep the temporary Cloudflare token until verification succeeds."
 say "The Admin Key remains at $ADMIN_KEY_FILE and was not written to this repository or shell history."
 unset ADMIN_KEY UPLOAD_KEY CLOUDFLARE_API_TOKEN
 
