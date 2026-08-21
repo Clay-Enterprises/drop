@@ -184,7 +184,7 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=9
+TOTAL_STAGES=6
 
 fail() {
   printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2
@@ -195,60 +195,6 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required."
 }
 
-require_identifier() {
-  [[ "$2" =~ ^[0-9a-f]{32}$ ]] || fail "$1 must be a 32-character Cloudflare ID."
-}
-
-ensure_bucket() {
-  local bucket="$1"
-  if bunx wrangler r2 bucket info "$bucket" >/dev/null 2>&1; then
-    note "$bucket already exists"
-  else
-    bunx wrangler r2 bucket create "$bucket" --update-config=false
-  fi
-}
-
-clear_cors() {
-  local bucket="$1"
-  local output="$BOOTSTRAP_TEMP/$bucket-cors.txt"
-  if ! bunx wrangler r2 bucket cors list "$bucket" >"$output" 2>&1; then
-    if grep -Fq 'code: 10059' "$output"; then
-      note "$bucket CORS is already empty"
-      return
-    fi
-    sed 's/^/  /' "$output" >&2
-    fail "Could not inspect $bucket CORS configuration."
-  fi
-  if grep -Eqi 'no cors|"rules"[[:space:]]*:[[:space:]]*\[\]|^[[:space:]]*\[[[:space:]]*\][[:space:]]*$' "$output"; then
-    note "$bucket CORS is already empty"
-  else
-    bunx wrangler r2 bucket cors delete "$bucket" --force
-  fi
-}
-
-remove_custom_domains() {
-  local bucket="$1"
-  local output="$BOOTSTRAP_TEMP/$bucket-domains.txt"
-  local domains="$BOOTSTRAP_TEMP/$bucket-domain-names.txt"
-  NO_COLOR=1 bunx wrangler r2 bucket domain list "$bucket" >"$output"
-  if grep -Fq 'There are no custom domains connected to this bucket.' "$output"; then
-    note "$bucket has no custom domains"
-    return
-  fi
-  awk '/^domain:[[:space:]]*/ { sub(/^domain:[[:space:]]*/, ""); print }' "$output" >"$domains"
-  [[ -s "$domains" ]] || fail "Could not inspect the custom domains attached to $bucket."
-  while IFS= read -r domain; do
-    bunx wrangler r2 bucket domain remove "$bucket" --domain "$domain" --force
-  done <"$domains"
-}
-
-domain_is_active() {
-  local output="$BOOTSTRAP_TEMP/domain.txt"
-  bunx wrangler r2 bucket domain get drop-content --domain drop.clay.sh >"$output" 2>/dev/null || return 1
-  grep -Eqi '^[[:space:]]*ownership_status:[[:space:]]+active[[:space:]]*$' "$output" &&
-    grep -Eqi '^[[:space:]]*ssl_status:[[:space:]]+active[[:space:]]*$' "$output"
-}
-
 if [[ "${1:-}" == "--check" ]]; then
   require_command bash
   require_command bun
@@ -256,6 +202,15 @@ if [[ "${1:-}" == "--check" ]]; then
   check_directory=$(mktemp -d)
   trap 'rm -rf -- "$check_directory"' EXIT
   bash -n "$0"
+  if command -v terraform >/dev/null 2>&1; then
+    terraform fmt -check -recursive infra/terraform >/dev/null
+    if [[ -d infra/terraform/.terraform ]]; then
+      terraform -chdir=infra/terraform validate >/dev/null
+    fi
+  fi
+  bun run scripts/ensure-control-bucket-private.ts --help >/dev/null
+  bun run scripts/ensure-workers-subdomain.ts --help >/dev/null
+  bun run scripts/r2-verification-token.ts --help >/dev/null
   bun run scripts/verify-production.ts --help >/dev/null
   bunx wrangler deploy --dry-run --outdir "$check_directory" >/dev/null
   printf 'Production bootstrap checks passed.\n'
@@ -264,52 +219,40 @@ fi
 
 require_command bun
 require_command bunx
-require_command curl
+require_command terraform
 
 umask 077
 BOOTSTRAP_TEMP=$(mktemp -d)
-R2_TOKEN_NEEDS_REVOCATION=0
+R2_TOKEN_ID=""
 
 cleanup_bootstrap() {
-  rm -rf -- "$BOOTSTRAP_TEMP"
-  if (( R2_TOKEN_NEEDS_REVOCATION )); then
-    warn "the temporary R2 token may still be live; revoke it at https://dash.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID:-}/r2/api-tokens"
+  if [[ -n "$R2_TOKEN_ID" && -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+    warn "revoking the short-lived R2 verification token after an interrupted run"
+    bun run scripts/r2-verification-token.ts revoke "$R2_TOKEN_ID" >/dev/null 2>&1 ||
+      warn "automatic R2 token revocation failed; it expires within two hours"
   fi
+  rm -rf -- "$BOOTSTRAP_TEMP"
 }
 
 trap cleanup_bootstrap EXIT
 
-banner "Provision drop.clay.sh"
+banner "Provision drop.clay.sh with Terraform"
 
-stage "Cloudflare account"
-say "Wrangler needs an authenticated Cloudflare session and the clay.sh account IDs."
-if bunx wrangler whoami --json >/dev/null 2>&1; then
-  note "Wrangler is already authenticated"
-else
-  step "Approve Wrangler in the browser window that opens."
-  bunx wrangler login
-fi
-open_url "https://dash.cloudflare.com/"
-step "Open the account that owns clay.sh. Copy its Account ID from the account overview."
-ask CLOUDFLARE_ACCOUNT_ID "Cloudflare Account ID:"
-require_identifier "Cloudflare Account ID" "$CLOUDFLARE_ACCOUNT_ID"
+CLOUDFLARE_ACCOUNT_ID="6e0cccdd787599d868ec17156c8d372f"
 export CLOUDFLARE_ACCOUNT_ID
-bunx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID" --json >/dev/null ||
-  fail "Wrangler is not authenticated for that Cloudflare account."
-step "Open clay.sh, then copy its Zone ID from the zone overview."
-ask CLOUDFLARE_ZONE_ID "clay.sh Zone ID:"
-require_identifier "clay.sh Zone ID" "$CLOUDFLARE_ZONE_ID"
 
-stage "R2 buckets"
-say "This creates the two production buckets and removes alternate public access."
-confirm "Provision drop-control and drop-content in this Cloudflare account?" || fail "Provisioning cancelled."
-ensure_bucket drop-control
-ensure_bucket drop-content
-clear_cors drop-control
-clear_cors drop-content
-bunx wrangler r2 bucket dev-url disable drop-control --force
-bunx wrangler r2 bucket dev-url disable drop-content --force
-remove_custom_domains drop-control
+stage "Cloudflare provisioning token"
+say "Terraform needs one temporary token. It stays in this process and is never written to disk or Terraform state."
+open_url "https://dash.cloudflare.com/profile/api-tokens"
+step "Select Create Token, then Create Custom Token. Name it 'Drop Terraform bootstrap'."
+step "Add Account permissions for Account API Tokens Edit, Workers Scripts Edit, and Workers R2 Storage Edit. Scope them to the clay.sh account."
+step "Add Zone permissions for Workers Routes Edit, Cache Rules Edit, Transform Rules Edit, and Zone Read. Scope them to clay.sh only."
+step "Set the token to expire tomorrow, create it, and copy its value."
+ask_secret CLOUDFLARE_API_TOKEN "Temporary Cloudflare API token:"
+[[ -n "$CLOUDFLARE_API_TOKEN" ]] || fail "The Cloudflare API token is required."
+export CLOUDFLARE_API_TOKEN
+bun -e 'const response = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", { headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` } }); const body = await response.json(); if (!response.ok || body.success !== true) process.exit(1)' ||
+  fail "Cloudflare rejected that API token."
 
 stage "Admin Key"
 say "The Admin Key is stored outside the repository and prepared as a Worker secret."
@@ -329,63 +272,23 @@ else
 fi
 printf 'ADMIN_KEY=%s\n' "$ADMIN_KEY" >"$BOOTSTRAP_TEMP/admin.env"
 
-stage "R2 domain and Worker route"
-say "drop-content serves Files and Docs. After its DNS record is active, the Worker route takes precedence for /api/*."
-if bunx wrangler r2 bucket domain list drop-content | grep -Fq 'drop.clay.sh'; then
-  note "drop.clay.sh is already attached to drop-content"
-else
-  bunx wrangler r2 bucket domain add drop-content \
-    --domain drop.clay.sh \
-    --zone-id "$CLOUDFLARE_ZONE_ID" \
-    --min-tls 1.2 \
-    --force
-fi
-for attempt in {1..40}; do
-  if domain_is_active; then
-    note "drop.clay.sh ownership and TLS are active"
-    break
-  fi
-  (( attempt == 40 )) && fail "drop.clay.sh did not become active within 10 minutes."
-  note "waiting for drop.clay.sh ownership and TLS"
-  sleep 15
-done
-say "Cloudflare requires an account workers.dev subdomain before it can create cron schedules. This Worker keeps its own workers.dev route disabled."
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/workers/onboarding"
-step "Open Workers & Pages. If Cloudflare prompts you, register the account's workers.dev subdomain. Do not enable the drop Worker's workers.dev route."
-pause "Press Enter after the Workers landing page has opened."
-confirm "Deploy the production Worker route and daily cron now?" || fail "Worker deployment cancelled."
+stage "Terraform infrastructure"
+say "Terraform adopts the buckets, route, cron, and subdomain from the earlier runs, then creates the cache and response-header rules."
+terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform plan -out="$BOOTSTRAP_TEMP/production.tfplan"
+confirm "Apply this Terraform plan to the live clay.sh account?" || fail "Terraform apply cancelled."
+terraform -chdir=infra/terraform apply "$BOOTSTRAP_TEMP/production.tfplan"
+
+stage "Worker deployment"
+say "Wrangler uploads only Worker code, bindings, observability settings, and the Admin Key. Terraform owns its route and cron."
+confirm "Deploy the production Worker now?" || fail "Worker deployment cancelled."
 bunx wrangler deploy --secrets-file "$BOOTSTRAP_TEMP/admin.env"
 
-stage "Cache rule"
-say "Cloudflare must bypass cache for every public File and Doc response."
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/clay.sh/caching/cache-rules"
-step "Create or edit a Cache Rule named 'Drop public reads do not cache'."
-step "Use this expression: (http.host eq \"drop.clay.sh\" and (starts_with(http.request.uri.path, \"/files/\") or starts_with(http.request.uri.path, \"/docs/\")))"
-step "Set Cache eligibility to Bypass cache, then deploy the rule."
-pause "Press Enter after the cache rule is deployed."
-
-stage "Response headers"
-say "Create two response-header rules for public reads. Edit existing rules with these names on a re-run."
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/clay.sh/rules/transform-rules/modify-response-header"
-step "Create 'Drop public response headers' with the same /files/ and /docs/ expression from the previous stage."
-step "Set static Cache-Control=no-store, X-Content-Type-Options=nosniff, Referrer-Policy=no-referrer, and X-Robots-Tag=noindex, nofollow, noarchive. Deploy it."
-step "Create 'Drop Doc CSP' matching: (http.host eq \"drop.clay.sh\" and starts_with(http.request.uri.path, \"/docs/\"))"
-step "Set static Content-Security-Policy to: default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
-step "Deploy the Doc rule."
-pause "Press Enter after both response-header rules are deployed."
-
-stage "Temporary R2 credential"
-say "Live expiry verification needs a short-lived credential that can change one test object's metadata."
-R2_TOKEN_NEEDS_REVOCATION=1
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/r2/api-tokens"
-step "Create an Account API token with Object Read & Write access to drop-content only."
-step "Copy the Access Key ID and Secret Access Key. Do not save them in a shell command or repository file."
-ask R2_ACCESS_KEY_ID "Temporary R2 Access Key ID:"
-ask_secret R2_SECRET_ACCESS_KEY "Temporary R2 Secret Access Key:"
-[[ -n "$R2_ACCESS_KEY_ID" && -n "$R2_SECRET_ACCESS_KEY" ]] || fail "Both temporary R2 credential values are required."
-
 stage "Upload Key and live acceptance"
-say "This creates the initial Upload Key, configures the local CLI, and exercises the live service."
+say "This creates the initial Upload Key and a two-hour, drop-content-only verification credential, then exercises the live service."
+bun run scripts/r2-verification-token.ts create "$BOOTSTRAP_TEMP/r2.env"
+source "$BOOTSTRAP_TEMP/r2.env"
+export R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
 set +e
 (
   set -e
@@ -412,24 +315,24 @@ set +e
 ACCEPTANCE_STATUS=$?
 set -e
 
-stage "Revoke the temporary credential"
-say "The R2 credential is no longer needed. Revoking it also invalidates any derived credentials."
-open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/r2/api-tokens"
-step "Find the temporary drop-content token created in stage 7 and revoke it."
-confirm "Has the temporary R2 token been revoked?" || fail "Revoke the temporary R2 token before completing bootstrap."
-R2_TOKEN_NEEDS_REVOCATION=0
+bun run scripts/r2-verification-token.ts revoke "$R2_TOKEN_ID"
+R2_TOKEN_ID=""
 unset R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
 (( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed; the temporary token was revoked safely."
 
-stage "Production logs"
+stage "Production confirmation"
 say "Inspect the custom Drop events from the acceptance run."
 open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/workers/services/view/drop/production/observability/logs"
 step "Open a recent custom event. Its application fields must be timestamp, credentialId, url, kind, size, retention, outcome, and status only."
 step "Confirm there is no Worker Logpush or Tail Worker sink and no application rate limiter."
 confirm "Do the logs and production settings match?" || fail "Production log verification was not confirmed."
+say "The provisioning token is no longer needed."
+open_url "https://dash.cloudflare.com/profile/api-tokens"
+step "Revoke 'Drop Terraform bootstrap'."
+confirm "Has the Terraform bootstrap token been revoked?" || fail "Revoke the provisioning token before completing bootstrap."
 
 say "The initial Upload Key is configured in the local CLI."
 say "The Admin Key remains at $ADMIN_KEY_FILE and was not written to this repository or shell history."
-unset ADMIN_KEY UPLOAD_KEY
+unset ADMIN_KEY UPLOAD_KEY CLOUDFLARE_API_TOKEN
 
 finish

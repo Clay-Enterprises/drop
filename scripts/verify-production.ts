@@ -128,11 +128,8 @@ async function openBrowser(url: string): Promise<void> {
   }
 }
 
-async function deploySchedule(schedule?: string): Promise<void> {
-  const arguments_ = ["bunx", "wrangler", "deploy"];
-  if (schedule !== undefined) {
-    arguments_.push("--schedules", schedule);
-  }
+async function deploySchedule(schedule: string): Promise<void> {
+  const arguments_ = ["bunx", "wrangler", "deploy", "--schedules", schedule];
   const deployment = Bun.spawn(arguments_, {
     stderr: "inherit",
     stdout: "inherit",
@@ -140,8 +137,8 @@ async function deploySchedule(schedule?: string): Promise<void> {
   const exitCode = await deployment.exited;
   if (exitCode !== 0) {
     throw new Error(
-      schedule === undefined
-        ? "Could not restore the daily production deployment."
+      schedule === "0 0 * * *"
+        ? "Could not restore the daily production schedule."
         : "Could not deploy the temporary expiry-test schedule.",
     );
   }
@@ -476,7 +473,7 @@ async function main(): Promise<void> {
     const cleanupErrors: string[] = [];
     if (minuteScheduleDeployed) {
       say("restoring the daily production schedule");
-      await deploySchedule().catch((error: unknown) => {
+      await deploySchedule("0 0 * * *").catch((error: unknown) => {
         cleanupErrors.push(
           error instanceof Error ? error.message : String(error),
         );

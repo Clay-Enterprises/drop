@@ -129,7 +129,11 @@ bun install --frozen-lockfile
 bun run bootstrap
 ```
 
-The wizard creates and verifies the production resources. It pauses for Cloudflare login, cache and response-header rules, a temporary bucket-scoped R2 credential, manual Doc refresh, and final log inspection. It configures the initial Upload Key in the local CLI and stores the Admin Key at `$XDG_CONFIG_HOME/drop/admin-key`, or `~/.config/drop/admin-key` when `XDG_CONFIG_HOME` is unset, with mode `0600`.
+The wizard asks for one temporary, scoped Cloudflare API token, shows the Terraform plan, and waits for confirmation before applying it. Terraform adopts the resources from earlier runs and owns the R2 buckets, public-access settings, Worker route and cron, cache bypass, response headers, and disabled Worker subdomains. Wrangler owns only the Worker code, bindings, observability configuration, and Admin Key.
+
+The bootstrap creates its bucket-scoped R2 verification credential through the API and revokes it automatically, including after a failed acceptance run. It pauses only for the browser refresh check, final log inspection, and revocation of the provisioning token. It configures the initial Upload Key in the local CLI and stores the Admin Key at `$XDG_CONFIG_HOME/drop/admin-key`, or `~/.config/drop/admin-key` when `XDG_CONFIG_HOME` is unset, with mode `0600`.
+
+The Terraform root is in [`infra/terraform`](infra/terraform/README.md). Its state files and saved plans are intentionally local and ignored; committed import blocks adopt the production resources from a fresh checkout.
 
 `bun run verify:production` reruns the destructive live acceptance checks when supplied the environment variables shown by `bun run verify:production --help`. The verifier cleans up its test Drops and restores the daily schedule before it exits.
 

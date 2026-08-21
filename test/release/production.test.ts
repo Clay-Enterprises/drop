@@ -1,98 +1,6 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-
-test("production bootstrap accepts empty CORS and an active custom domain", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "drop-bootstrap-"));
-  const fakeBin = join(directory, "bin");
-  const onboardingMarker = join(directory, "workers-onboarded");
-  await mkdir(fakeBin);
-  const bunx = join(fakeBin, "bunx");
-  await writeFile(
-    bunx,
-    `#!/usr/bin/env bash
-case "$*" in
-  "wrangler whoami --json") exit 0 ;;
-  "wrangler whoami --account "*" --json") exit 0 ;;
-  "wrangler r2 bucket info drop-control"|"wrangler r2 bucket info drop-content") exit 0 ;;
-  "wrangler r2 bucket cors list "*)
-    printf 'The CORS configuration does not exist. [code: 10059]\\n' >&2
-    exit 1
-    ;;
-  "wrangler r2 bucket dev-url disable "*) exit 0 ;;
-  "wrangler r2 bucket domain list drop-control")
-    printf 'There are no custom domains connected to this bucket.\\n'
-    ;;
-  "wrangler r2 bucket domain list drop-content")
-    printf 'domain:            drop.clay.sh\\n'
-    ;;
-  "wrangler r2 bucket domain get drop-content --domain drop.clay.sh")
-    printf '%s\\n' \\
-      'domain:            drop.clay.sh' \\
-      'enabled:           Yes' \\
-      'ownership_status:  active' \\
-      'ssl_status:        active'
-    ;;
-  "wrangler deploy --secrets-file "*)
-    if [[ ! -f "$ONBOARDING_MARKER" ]]; then
-      printf 'You need a workers.dev subdomain in order to proceed. [code: 10063]\\n' >&2
-      exit 1
-    fi
-    printf 'reached worker deployment\\n'
-    exit 71
-    ;;
-  *) printf 'unexpected bunx call: %s\\n' "$*" >&2; exit 72 ;;
-esac
-`,
-  );
-  await chmod(bunx, 0o700);
-  const bun = join(fakeBin, "bun");
-  await writeFile(
-    bun,
-    `#!/usr/bin/env bash
-printf 'drop_a_%064d' 0
-`,
-  );
-  await chmod(bun, 0o700);
-  const open = join(fakeBin, "open");
-  await writeFile(
-    open,
-    `#!/usr/bin/env bash
-if [[ "$1" == */workers/onboarding ]]; then
-  touch "$ONBOARDING_MARKER"
-fi
-`,
-  );
-  await chmod(open, 0o700);
-  for (const command of ["curl", "sleep"]) {
-    const executable = join(fakeBin, command);
-    await writeFile(executable, "#!/usr/bin/env bash\nexit 0\n");
-    await chmod(executable, 0o700);
-  }
-
-  try {
-    const process = Bun.spawn(["bash", "scripts/bootstrap.sh"], {
-      env: {
-        ...Bun.env,
-        ONBOARDING_MARKER: onboardingMarker,
-        PATH: `${fakeBin}:${Bun.env.PATH ?? ""}`,
-        XDG_CONFIG_HOME: directory,
-      },
-      stdin: "pipe",
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\ny\ny\n`);
-    process.stdin.end();
-    const stdout = await new Response(process.stdout).text();
-    await process.exited;
-
-    expect(stdout).toContain("reached worker deployment");
-  } finally {
-    await rm(directory, { force: true, recursive: true });
-  }
-});
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 test("production bootstrap commands are safe to inspect without Cloudflare access", async () => {
   const manifest = JSON.parse(
@@ -127,7 +35,7 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
   expect(help.stdout.toString()).toContain("R2_ACCESS_KEY_ID");
 });
 
-test("production deploy uses one route, one cron, and app-only logs", async () => {
+test("Terraform owns production infrastructure and Wrangler owns Worker code", async () => {
   const config = JSON.parse(
     await readFile(resolve("wrangler.jsonc"), "utf8"),
   ) as {
@@ -135,18 +43,26 @@ test("production deploy uses one route, one cron, and app-only logs", async () =
       enabled?: boolean;
       logs?: { head_sampling_rate?: number; invocation_logs?: boolean };
     };
-    routes?: Array<{ pattern?: string; zone_name?: string }>;
-    triggers?: { crons?: string[] };
+    routes?: unknown;
+    triggers?: unknown;
     workers_dev?: boolean;
   };
+  const terraform = await readFile(
+    resolve("infra/terraform/main.tf"),
+    "utf8",
+  );
 
   expect(config.workers_dev).toBe(false);
-  expect(config.routes).toEqual([
-    { pattern: "drop.clay.sh/api/*", zone_name: "clay.sh" },
-  ]);
-  expect(config.triggers?.crons).toEqual(["0 0 * * *"]);
+  expect(config.routes).toBeUndefined();
+  expect(config.triggers).toBeUndefined();
   expect(config.observability).toEqual({
     enabled: true,
     logs: { head_sampling_rate: 1, invocation_logs: false },
   });
+  expect(terraform).toContain('resource "cloudflare_workers_route" "api"');
+  expect(terraform).toContain('pattern = "drop.clay.sh/api/*"');
+  expect(terraform).toContain('resource "cloudflare_workers_cron_trigger" "expiry"');
+  expect(terraform).toContain('{ cron = "0 0 * * *" }');
+  expect(terraform).toContain('resource "cloudflare_ruleset" "public_cache"');
+  expect(terraform).toContain('resource "cloudflare_ruleset" "public_headers"');
 });

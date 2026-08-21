@@ -169,6 +169,6 @@ There is one production environment at `drop.clay.sh`. Automated tests never use
 
 Structured Worker logs contain timestamp, credential ID, resulting URL, kind, size, Retention Class, outcome, and status. They exclude bearer secrets, original filenames, and content. There is no custom log sink or application rate limiter in v1.
 
-A guided bootstrap wizard creates the two R2 buckets, generates and stores the Admin Key without exposing it in shell history, deploys the Worker and cron trigger, guides the custom-domain and response-rule setup, creates the initial Upload Key, and configures the local CLI. It pauses for Cloudflare steps that require human interaction.
+A guided bootstrap uses Terraform to adopt and manage the two R2 buckets, public-access controls, Worker route and cron, cache bypass, response headers, and disabled Worker subdomains. It generates and stores the Admin Key without exposing it in shell history, deploys Worker code with Wrangler, creates the initial Upload Key, and configures the local CLI. The only dashboard work is creating and revoking a temporary, scoped provisioning token and inspecting the final logs.
 
 The initial delivery publishes `main` to the existing `Clay-Enterprises/drop` repository, creates a `v0.1.0` release, provisions and verifies `drop.clay.sh`, updates and pushes the dotfiles repository, and verifies File, video, Doc, Re-drop, retention, and expiry behavior.
