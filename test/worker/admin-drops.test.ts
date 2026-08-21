@@ -247,6 +247,19 @@ describe("Drop administration", () => {
     );
     expect(seeded.status).toBe(204);
 
+    const inventory = await fetch(`${workerd.url}/api/files`, {
+      headers: adminHeaders,
+    });
+    const body = (await inventory.json()) as {
+      readonly drops: ReadonlyArray<{
+        readonly expiresAt: string | null;
+        readonly url: string;
+      }>;
+    };
+    expect(body.drops.find(({ url }) => url === created.url)?.expiresAt).toBe(
+      new Date(0).toISOString(),
+    );
+
     const unauthorized = await fetch(`${workerd.url}/api/admin/sweep`, {
       method: "POST",
     });

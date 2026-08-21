@@ -99,7 +99,7 @@ app.patch("/__test/content-objects/:opaqueId/expiry", async (context) => {
     httpMetadata: current.httpMetadata,
     customMetadata: {
       ...current.customMetadata,
-      expiresAt: input.expiresAt,
+      expiresat: input.expiresAt,
     },
   });
   return context.body(null, 204);
@@ -116,7 +116,7 @@ app.patch("/__test/doc-objects/:opaqueId/expiry", async (context) => {
     httpMetadata: current.httpMetadata,
     customMetadata: {
       ...current.customMetadata,
-      expiresAt: input.expiresAt,
+      expiresat: input.expiresAt,
     },
   });
   return context.body(null, 204);

@@ -27,6 +27,14 @@ export interface ListDropsInput {
   readonly publicOrigin: string;
 }
 
+function storedExpiresAt(
+  customMetadata: Record<string, string> | undefined,
+): string | undefined {
+  // S3 user-metadata header names are lowercase. Prefer the S3 spelling when
+  // an operator overrides a Workers API value through CopyObject.
+  return customMetadata?.expiresat ?? customMetadata?.expiresAt;
+}
+
 export async function listDrops<
   Kind extends DropKind,
   ContentType extends string,
@@ -68,7 +76,7 @@ export async function listDrops<
     } catch {
       continue;
     }
-    const expiresAt = object.customMetadata.expiresAt ?? null;
+    const expiresAt = storedExpiresAt(object.customMetadata) ?? null;
     if (
       expiresAt !== null &&
       !Number.isFinite(new Date(expiresAt).getTime())
@@ -508,11 +516,12 @@ export async function sweepExpiredDrops(
       const retention = retentionSchema.safeParse(
         candidate.customMetadata?.retention,
       );
+      const expiresAt = storedExpiresAt(candidate.customMetadata);
       if (
         !retention.success ||
         retention.data === "keep" ||
-        candidate.customMetadata?.expiresAt === undefined ||
-        new Date(candidate.customMetadata.expiresAt).getTime() > now
+        expiresAt === undefined ||
+        new Date(expiresAt).getTime() > now
       ) {
         continue;
       }
