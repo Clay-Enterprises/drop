@@ -24,3 +24,13 @@ import {
   to = cloudflare_workers_script_subdomain.drop
   id = "${local.account_id}/${local.worker_name}"
 }
+
+import {
+  to = cloudflare_ruleset.public_cache
+  id = "zones/${local.zone_id}/${one(local.cache_entrypoint_rulesets).id}"
+}
+
+import {
+  to = cloudflare_ruleset.public_headers
+  id = "zones/${local.zone_id}/${one(local.header_entrypoint_rulesets).id}"
+}

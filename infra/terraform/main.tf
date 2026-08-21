@@ -20,16 +20,23 @@ resource "cloudflare_r2_bucket" "content" {
   }
 }
 
-resource "cloudflare_r2_bucket_cors" "control" {
-  account_id  = local.account_id
-  bucket_name = cloudflare_r2_bucket.control.name
-  rules       = []
-}
+resource "terraform_data" "r2_cors" {
+  triggers_replace = [
+    filesha256("${path.module}/../../scripts/ensure-r2-cors-disabled.ts"),
+  ]
 
-resource "cloudflare_r2_bucket_cors" "content" {
-  account_id  = local.account_id
-  bucket_name = cloudflare_r2_bucket.content.name
-  rules       = []
+  provisioner "local-exec" {
+    command = "bun run ../../scripts/ensure-r2-cors-disabled.ts"
+
+    environment = {
+      CLOUDFLARE_ACCOUNT_ID = local.account_id
+    }
+  }
+
+  depends_on = [
+    cloudflare_r2_bucket.content,
+    cloudflare_r2_bucket.control,
+  ]
 }
 
 resource "cloudflare_r2_managed_domain" "control" {
@@ -131,6 +138,10 @@ resource "cloudflare_workers_script_subdomain" "drop" {
   depends_on = [terraform_data.workers_account_subdomain]
 }
 
+data "cloudflare_rulesets" "zone" {
+  zone_id = local.zone_id
+}
+
 resource "cloudflare_ruleset" "public_cache" {
   zone_id     = local.zone_id
   name        = "Drop public cache policy"
@@ -148,6 +159,13 @@ resource "cloudflare_ruleset" "public_cache" {
       cache = false
     }
   }]
+
+  lifecycle {
+    precondition {
+      condition     = length(local.cache_entrypoint_rulesets) == 1
+      error_message = "The clay.sh zone must have exactly one cache-settings entrypoint ruleset to adopt."
+    }
+  }
 }
 
 resource "cloudflare_ruleset" "public_headers" {
@@ -201,4 +219,11 @@ resource "cloudflare_ruleset" "public_headers" {
       }
     },
   ]
+
+  lifecycle {
+    precondition {
+      condition     = length(local.header_entrypoint_rulesets) == 1
+      error_message = "The clay.sh zone must have exactly one response-header entrypoint ruleset to adopt."
+    }
+  }
 }

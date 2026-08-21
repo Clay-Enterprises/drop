@@ -65,4 +65,7 @@ test("Terraform owns production infrastructure and Wrangler owns Worker code", a
   expect(terraform).toContain('{ cron = "0 0 * * *" }');
   expect(terraform).toContain('resource "cloudflare_ruleset" "public_cache"');
   expect(terraform).toContain('resource "cloudflare_ruleset" "public_headers"');
+  expect(terraform).not.toContain('resource "cloudflare_r2_bucket_cors"');
+  expect(terraform).toContain('resource "terraform_data" "r2_cors"');
+  expect(terraform).toContain('data "cloudflare_rulesets" "zone"');
 });

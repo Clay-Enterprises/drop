@@ -9,4 +9,13 @@ locals {
   doc_path_expression    = "(http.host eq \"drop.clay.sh\" and starts_with(http.request.uri.path, \"/docs/\"))"
 
   doc_csp = "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src data: https:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src data: https:; media-src data: https:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
+
+  cache_entrypoint_rulesets = [
+    for ruleset in data.cloudflare_rulesets.zone.rulesets : ruleset
+    if ruleset.kind == "zone" && ruleset.phase == "http_request_cache_settings"
+  ]
+  header_entrypoint_rulesets = [
+    for ruleset in data.cloudflare_rulesets.zone.rulesets : ruleset
+    if ruleset.kind == "zone" && ruleset.phase == "http_response_headers_transform"
+  ]
 }

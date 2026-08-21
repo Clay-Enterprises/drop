@@ -209,6 +209,7 @@ if [[ "${1:-}" == "--check" ]]; then
     fi
   fi
   bun run scripts/ensure-control-bucket-private.ts --help >/dev/null
+  bun run scripts/ensure-r2-cors-disabled.ts --help >/dev/null
   bun run scripts/ensure-workers-subdomain.ts --help >/dev/null
   bun run scripts/r2-verification-token.ts --help >/dev/null
   bun run scripts/verify-production.ts --help >/dev/null
@@ -243,6 +244,7 @@ export CLOUDFLARE_ACCOUNT_ID
 
 stage "Cloudflare provisioning token"
 say "Terraform needs one temporary token. It stays in this process and is never written to disk or Terraform state."
+note "If a previous run failed and its token is still active, reuse that token."
 open_url "https://dash.cloudflare.com/profile/api-tokens"
 step "Select Create Token, then Create Custom Token. Name it 'Drop Terraform bootstrap'."
 step "Add Account permissions for Account API Tokens Edit, Workers Scripts Edit, and Workers R2 Storage Edit. Scope them to the clay.sh account."

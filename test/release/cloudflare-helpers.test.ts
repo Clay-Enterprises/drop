@@ -6,6 +6,50 @@ import { join } from "node:path";
 
 const accountId = "6e0cccdd787599d868ec17156c8d372f";
 
+test("R2 CORS helper deletes policies and accepts missing configuration", async () => {
+  const deleted: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      expect(request.method).toBe("DELETE");
+      expect(request.headers.get("authorization")).toBe("Bearer test-secret");
+      const bucket = url.pathname.split("/").at(-2) ?? "";
+      deleted.push(bucket);
+      return bucket === "drop-control"
+        ? Response.json({ errors: [], result: null, success: true })
+        : Response.json(
+            {
+              errors: [{ code: 10059, message: "The CORS configuration does not exist." }],
+              result: null,
+              success: false,
+            },
+            { status: 404 },
+          );
+    },
+  });
+
+  try {
+    const process = Bun.spawn(
+      ["bun", "run", "scripts/ensure-r2-cors-disabled.ts"],
+      {
+        env: {
+          ...Bun.env,
+          CLOUDFLARE_ACCOUNT_ID: accountId,
+          CLOUDFLARE_API_ORIGIN: server.url.toString(),
+          CLOUDFLARE_API_TOKEN: "test-secret",
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      },
+    );
+    expect(await process.exited).toBe(0);
+    expect(deleted).toEqual(["drop-control", "drop-content"]);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("control-bucket helper removes every custom domain", async () => {
   const removed: string[] = [];
   const server = Bun.serve({
