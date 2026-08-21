@@ -161,6 +161,26 @@ test("R2 verification token helper creates scoped credentials and revokes them",
       }
       if (url.pathname.endsWith("/tokens") && request.method === "POST") {
         createdPolicy = await request.json();
+        const expiresOn = (createdPolicy as { expires_on?: unknown }).expires_on;
+        if (
+          typeof expiresOn !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(expiresOn)
+        ) {
+          return Response.json(
+            {
+              errors: [
+                {
+                  code: 400,
+                  message:
+                    'expires_on must be a valid date/time in the format "2005-12-30T01:02:03Z"',
+                },
+              ],
+              result: null,
+              success: false,
+            },
+            { status: 400 },
+          );
+        }
         return Response.json({
           errors: [],
           result: { id: tokenId, value: tokenValue },

@@ -106,7 +106,9 @@ async function create(environment: z.infer<typeof environmentSchema>, output: st
     throw new Error("Cloudflare did not return the R2 bucket-item write permission group.");
   }
 
-  const expiresOn = new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString();
+  const expiresOn = new Date(Date.now() + 2 * 60 * 60 * 1_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z");
   const tokenResponse = await cloudflareRequest(
     accountUrl(environment, "tokens"),
     environment.CLOUDFLARE_API_TOKEN,
