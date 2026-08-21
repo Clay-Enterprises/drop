@@ -10,6 +10,28 @@ export interface WorkerdServer {
   stop(): Promise<void>;
 }
 
+const readinessTimeoutMs = 20_000;
+
+async function stopProcessTree(subprocess: Bun.Subprocess): Promise<void> {
+  if (process.platform === "win32") {
+    const taskkill = Bun.spawn(
+      ["taskkill", "/pid", String(subprocess.pid), "/t", "/f"],
+      { stderr: "pipe", stdout: "ignore" },
+    );
+    const [exitCode, error] = await Promise.all([
+      taskkill.exited,
+      new Response(taskkill.stderr).text(),
+    ]);
+    if (exitCode !== 0 && subprocess.exitCode === null) {
+      throw new Error(`Failed to stop wrangler\n${error}`);
+    }
+  } else {
+    subprocess.kill();
+  }
+
+  await subprocess.exited;
+}
+
 export async function startWorkerd(): Promise<WorkerdServer> {
   const portProbe = Bun.serve({
     port: 0,
@@ -44,7 +66,8 @@ export async function startWorkerd(): Promise<WorkerdServer> {
   const stderr = new Response(process.stderr).text();
   const url = `http://127.0.0.1:${port}`;
 
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const readinessDeadline = performance.now() + readinessTimeoutMs;
+  while (performance.now() < readinessDeadline) {
     if (process.exitCode !== null) {
       throw new Error(
         `wrangler exited before becoming ready\n${await stdout}\n${await stderr}`,
@@ -82,8 +105,7 @@ export async function startWorkerd(): Promise<WorkerdServer> {
           return JSON.parse(output);
         },
         async stop() {
-          process.kill();
-          await process.exited;
+          await stopProcessTree(process);
           await Promise.all([stdout, stderr]);
           await rm(persistencePath, { force: true, recursive: true });
         },
@@ -93,7 +115,6 @@ export async function startWorkerd(): Promise<WorkerdServer> {
     }
   }
 
-  process.kill();
-  await process.exited;
+  await stopProcessTree(process);
   throw new Error(`wrangler did not become ready\n${await stdout}\n${await stderr}`);
 }
