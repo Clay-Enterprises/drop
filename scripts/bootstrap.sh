@@ -219,6 +219,22 @@ clear_cors() {
   fi
 }
 
+remove_custom_domains() {
+  local bucket="$1"
+  local output="$BOOTSTRAP_TEMP/$bucket-domains.txt"
+  local domains="$BOOTSTRAP_TEMP/$bucket-domain-names.txt"
+  NO_COLOR=1 bunx wrangler r2 bucket domain list "$bucket" >"$output"
+  if grep -Fq 'There are no custom domains connected to this bucket.' "$output"; then
+    note "$bucket has no custom domains"
+    return
+  fi
+  awk '/^domain:[[:space:]]*/ { sub(/^domain:[[:space:]]*/, ""); print }' "$output" >"$domains"
+  [[ -s "$domains" ]] || fail "Could not inspect the custom domains attached to $bucket."
+  while IFS= read -r domain; do
+    bunx wrangler r2 bucket domain remove "$bucket" --domain "$domain" --force
+  done <"$domains"
+}
+
 domain_is_active() {
   local output="$BOOTSTRAP_TEMP/domain.txt"
   bunx wrangler r2 bucket domain get drop-content --domain drop.clay.sh >"$output" 2>/dev/null || return 1
@@ -245,7 +261,16 @@ require_command curl
 
 umask 077
 BOOTSTRAP_TEMP=$(mktemp -d)
-trap 'rm -rf -- "$BOOTSTRAP_TEMP"' EXIT
+R2_TOKEN_NEEDS_REVOCATION=0
+
+cleanup_bootstrap() {
+  rm -rf -- "$BOOTSTRAP_TEMP"
+  if (( R2_TOKEN_NEEDS_REVOCATION )); then
+    warn "the temporary R2 token may still be live; revoke it at https://dash.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID:-}/r2/api-tokens"
+  fi
+}
+
+trap cleanup_bootstrap EXIT
 
 banner "Provision drop.clay.sh"
 
@@ -261,6 +286,9 @@ open_url "https://dash.cloudflare.com/"
 step "Open the account that owns clay.sh. Copy its Account ID from the account overview."
 ask CLOUDFLARE_ACCOUNT_ID "Cloudflare Account ID:"
 require_identifier "Cloudflare Account ID" "$CLOUDFLARE_ACCOUNT_ID"
+export CLOUDFLARE_ACCOUNT_ID
+bunx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID" --json >/dev/null ||
+  fail "Wrangler is not authenticated for that Cloudflare account."
 step "Open clay.sh, then copy its Zone ID from the zone overview."
 ask CLOUDFLARE_ZONE_ID "clay.sh Zone ID:"
 require_identifier "clay.sh Zone ID" "$CLOUDFLARE_ZONE_ID"
@@ -274,6 +302,7 @@ clear_cors drop-control
 clear_cors drop-content
 bunx wrangler r2 bucket dev-url disable drop-control --force
 bunx wrangler r2 bucket dev-url disable drop-content --force
+remove_custom_domains drop-control
 
 stage "Admin Key"
 say "The Admin Key is stored outside the repository and prepared as a Worker secret."
@@ -336,6 +365,7 @@ pause "Press Enter after both response-header rules are deployed."
 
 stage "Temporary R2 credential"
 say "Live expiry verification needs a short-lived credential that can change one test object's metadata."
+R2_TOKEN_NEEDS_REVOCATION=1
 open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/r2/api-tokens"
 step "Create an Account API token with Object Read & Write access to drop-content only."
 step "Copy the Access Key ID and Secret Access Key. Do not save them in a shell command or repository file."
@@ -345,32 +375,40 @@ ask_secret R2_SECRET_ACCESS_KEY "Temporary R2 Secret Access Key:"
 
 stage "Upload Key and live acceptance"
 say "This creates the initial Upload Key, configures the local CLI, and exercises the live service."
-UPLOAD_KEY_CONFIG="$DROP_CONFIG_DIRECTORY/config.json"
-UPLOAD_KEY=""
-if [[ -f "$UPLOAD_KEY_CONFIG" ]]; then
-  UPLOAD_KEY=$(bun -e 'const path = process.argv[1]; try { const value = await Bun.file(path).json(); if (typeof value.uploadKey === "string") process.stdout.write(value.uploadKey); } catch {}' "$UPLOAD_KEY_CONFIG")
-fi
-KEY_LIST=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys list --json)
-if [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] && grep -Fq "${UPLOAD_KEY:7:32}" <<<"$KEY_LIST"; then
-  note "using the Upload Key already configured in the local CLI"
-else
-  UPLOAD_KEY=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys create)
-fi
-[[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] || fail "The live Admin interface returned an invalid Upload Key."
-printf '%s' "$UPLOAD_KEY" | bun run src/cli/index.ts auth set
-DROP_ADMIN_KEY="$ADMIN_KEY" \
-DROP_UPLOAD_KEY="$UPLOAD_KEY" \
-R2_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
-R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
-R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-bun run verify:production
+set +e
+(
+  set -e
+  UPLOAD_KEY_CONFIG="$DROP_CONFIG_DIRECTORY/config.json"
+  UPLOAD_KEY=""
+  if [[ -f "$UPLOAD_KEY_CONFIG" ]]; then
+    UPLOAD_KEY=$(bun -e 'const path = process.argv[1]; try { const value = await Bun.file(path).json(); if (typeof value.uploadKey === "string") process.stdout.write(value.uploadKey); } catch {}' "$UPLOAD_KEY_CONFIG")
+  fi
+  KEY_LIST=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys list --json)
+  if [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] && grep -Fq "${UPLOAD_KEY:7:32}" <<<"$KEY_LIST"; then
+    note "using the Upload Key already configured in the local CLI"
+  else
+    UPLOAD_KEY=$(DROP_ADMIN_KEY="$ADMIN_KEY" DROP_API_URL="https://drop.clay.sh" bun run src/cli/index.ts admin keys create)
+  fi
+  [[ "$UPLOAD_KEY" =~ ^drop_u_[0-9a-f]{32}_[0-9a-f]{64}$ ]] || fail "The live Admin interface returned an invalid Upload Key."
+  printf '%s' "$UPLOAD_KEY" | bun run src/cli/index.ts auth set
+  DROP_ADMIN_KEY="$ADMIN_KEY" \
+  DROP_UPLOAD_KEY="$UPLOAD_KEY" \
+  R2_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
+  R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+  R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+  bun run verify:production
+)
+ACCEPTANCE_STATUS=$?
+set -e
 
 stage "Revoke the temporary credential"
 say "The R2 credential is no longer needed. Revoking it also invalidates any derived credentials."
 open_url "https://dash.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/r2/api-tokens"
 step "Find the temporary drop-content token created in stage 7 and revoke it."
 confirm "Has the temporary R2 token been revoked?" || fail "Revoke the temporary R2 token before completing bootstrap."
+R2_TOKEN_NEEDS_REVOCATION=0
 unset R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+(( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed; the temporary token was revoked safely."
 
 stage "Production logs"
 say "Inspect the custom Drop events from the acceptance run."

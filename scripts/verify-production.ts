@@ -4,6 +4,7 @@ import { AwsClient } from "aws4fetch";
 import { z } from "zod";
 
 import { docUploadResponseSchema } from "../src/shared/docs.ts";
+import { dropInventoryPageSchema } from "../src/shared/drops.ts";
 import { fileUploadResponseSchema } from "../src/shared/files.ts";
 import {
   createdUploadKeySchema,
@@ -97,6 +98,16 @@ async function expectStatus(
   return response;
 }
 
+async function parseResponse<T>(
+  response: Response,
+  status: number,
+  operation: string,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  await expectStatus(response, status, operation);
+  return schema.parse(await response.json());
+}
+
 function apiPath(publicUrl: string): string {
   const url = new URL(publicUrl);
   return `/api${url.pathname}`;
@@ -165,7 +176,7 @@ async function main(): Promise<void> {
     assert(root.status !== 200, "The public hostname unexpectedly served a directory listing.");
 
     say("creating a File through the authenticated Worker route");
-    const createdFileResponse = await expectStatus(
+    const createdFile = await parseResponse(
       await apiFetch("/api/files", {
         method: "POST",
         headers: {
@@ -177,9 +188,7 @@ async function main(): Promise<void> {
       }),
       201,
       "File creation",
-    );
-    const createdFile = fileUploadResponseSchema.parse(
-      await createdFileResponse.json(),
+      fileUploadResponseSchema,
     );
     createdDrops.push(createdFile.url);
     assert(
@@ -261,7 +270,7 @@ async function main(): Promise<void> {
     );
 
     say("Re-dropping the File and changing its Retention Class");
-    const replacedFileResponse = await expectStatus(
+    const replacedFile = await parseResponse(
       await apiFetch(apiPath(createdFile.url), {
         method: "PUT",
         headers: {
@@ -273,51 +282,43 @@ async function main(): Promise<void> {
       }),
       200,
       "File Re-drop",
-    );
-    const replacedFile = fileUploadResponseSchema.parse(
-      await replacedFileResponse.json(),
+      fileUploadResponseSchema,
     );
     assert(replacedFile.url === createdFile.url, "File Re-drop changed its URL.");
     assert(
       replacedFile.contentType === "image/gif",
       "File Re-drop did not change its media type.",
     );
-    const changedFile = fileUploadResponseSchema.parse(
-      await (
-        await expectStatus(
-          await apiFetch(apiPath(createdFile.url), {
-            method: "PATCH",
-            headers: {
-              ...uploadHeaders,
-              "Content-Type": "application/json",
-              "If-Match": replacedFile.etag,
-            },
-            body: JSON.stringify({ retention: "30d" }),
-          }),
-          200,
-          "File retention change",
-        )
-      ).json(),
+    const changedFile = await parseResponse(
+      await apiFetch(apiPath(createdFile.url), {
+        method: "PATCH",
+        headers: {
+          ...uploadHeaders,
+          "Content-Type": "application/json",
+          "If-Match": replacedFile.etag,
+        },
+        body: JSON.stringify({ retention: "30d" }),
+      }),
+      200,
+      "File retention change",
+      fileUploadResponseSchema,
     );
     assert(changedFile.retention === "30d", "File Retention Class did not change.");
 
     say("creating a Doc for the manual refresh check");
-    const createdDoc = docUploadResponseSchema.parse(
-      await (
-        await expectStatus(
-          await apiFetch("/api/docs", {
-            method: "POST",
-            headers: {
-              ...uploadHeaders,
-              "Content-Disposition": 'inline; filename="acceptance.html"',
-              "Drop-Retention": "7d",
-            },
-            body: firstDoc,
-          }),
-          201,
-          "Doc creation",
-        )
-      ).json(),
+    const createdDoc = await parseResponse(
+      await apiFetch("/api/docs", {
+        method: "POST",
+        headers: {
+          ...uploadHeaders,
+          "Content-Disposition": 'inline; filename="acceptance.html"',
+          "Drop-Retention": "7d",
+        },
+        body: firstDoc,
+      }),
+      201,
+      "Doc creation",
+      docUploadResponseSchema,
     );
     createdDrops.push(createdDoc.url);
     const publicDoc = await expectStatus(
@@ -343,22 +344,19 @@ async function main(): Promise<void> {
       await terminal.question(
         "  Confirm the browser shows 'first revision', then press Enter. ",
       );
-      const replacedDoc = docUploadResponseSchema.parse(
-        await (
-          await expectStatus(
-            await apiFetch(apiPath(createdDoc.url), {
-              method: "PUT",
-              headers: {
-                ...uploadHeaders,
-                "Content-Disposition": 'inline; filename="acceptance.html"',
-                "If-Match": createdDoc.etag,
-              },
-              body: secondDoc,
-            }),
-            200,
-            "Doc Re-drop",
-          )
-        ).json(),
+      const replacedDoc = await parseResponse(
+        await apiFetch(apiPath(createdDoc.url), {
+          method: "PUT",
+          headers: {
+            ...uploadHeaders,
+            "Content-Disposition": 'inline; filename="acceptance.html"',
+            "If-Match": createdDoc.etag,
+          },
+          body: secondDoc,
+        }),
+        200,
+        "Doc Re-drop",
+        docUploadResponseSchema,
       );
       assert(
         replacedDoc.url === createdDoc.url,
@@ -377,34 +375,28 @@ async function main(): Promise<void> {
     );
 
     say("checking Admin inventory, key creation, key revocation, and deletion");
-    const inventory = await expectStatus(
+    const inventory = await parseResponse(
       await apiFetch("/api/files", { headers: adminHeaders }),
       200,
       "Admin File inventory",
+      dropInventoryPageSchema,
     );
-    const inventoryBody = (await inventory.json()) as { drops?: Array<{ url?: string }> };
     assert(
-      inventoryBody.drops?.some(({ url }) => url === createdFile.url),
+      inventory.drops.some(({ url }) => url === createdFile.url),
       "Admin inventory omitted the acceptance File.",
     );
-    const disposableKey = createdUploadKeySchema.parse(
-      await (
-        await expectStatus(
-          await apiFetch("/api/admin/keys", { method: "POST", headers: adminHeaders }),
-          201,
-          "Admin Upload Key creation",
-        )
-      ).json(),
+    const disposableKey = await parseResponse(
+      await apiFetch("/api/admin/keys", { method: "POST", headers: adminHeaders }),
+      201,
+      "Admin Upload Key creation",
+      createdUploadKeySchema,
     );
     disposableCredentialId = disposableKey.credentialId;
-    const listedKeys = uploadKeyListSchema.parse(
-      await (
-        await expectStatus(
-          await apiFetch("/api/admin/keys", { headers: adminHeaders }),
-          200,
-          "Admin Upload Key inventory",
-        )
-      ).json(),
+    const listedKeys = await parseResponse(
+      await apiFetch("/api/admin/keys", { headers: adminHeaders }),
+      200,
+      "Admin Upload Key inventory",
+      uploadKeyListSchema,
     );
     assert(
       listedKeys.keys.some(({ credentialId }) => credentialId === disposableKey.credentialId),
@@ -421,22 +413,19 @@ async function main(): Promise<void> {
     disposableCredentialId = undefined;
 
     say("creating a separate File for the live expiry sweep");
-    const expiryFile = fileUploadResponseSchema.parse(
-      await (
-        await expectStatus(
-          await apiFetch("/api/files", {
-            method: "POST",
-            headers: {
-              ...uploadHeaders,
-              "Content-Disposition": 'inline; filename="expiry.png"',
-              "Drop-Retention": "7d",
-            },
-            body: png,
-          }),
-          201,
-          "expiry File creation",
-        )
-      ).json(),
+    const expiryFile = await parseResponse(
+      await apiFetch("/api/files", {
+        method: "POST",
+        headers: {
+          ...uploadHeaders,
+          "Content-Disposition": 'inline; filename="expiry.png"',
+          "Drop-Retention": "7d",
+        },
+        body: png,
+      }),
+      201,
+      "expiry File creation",
+      fileUploadResponseSchema,
     );
     createdDrops.push(expiryFile.url);
     const expiryKey = new URL(expiryFile.url).pathname.slice(1);

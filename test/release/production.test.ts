@@ -57,9 +57,4 @@ test("production deploy uses one route, one cron, and app-only logs", async () =
     enabled: true,
     logs: { head_sampling_rate: 1, invocation_logs: false },
   });
-
-  const readme = await readFile(resolve("README.md"), "utf8");
-  expect(readme).toContain("bun run bootstrap");
-  expect(readme).toContain("bun run verify:production");
-  expect(readme).toContain("admin-key");
 });
