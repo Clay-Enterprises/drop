@@ -28,6 +28,14 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
       '(( ACCEPTANCE_STATUS == 0 )) || fail "Live acceptance failed."',
     ),
   );
+  expect(bootstrap).toContain(
+    '2>&1 | tee "$BOOTSTRAP_TEMP/acceptance.log"',
+  );
+  expect(
+    bootstrap.indexOf('tail -n 20 "$BOOTSTRAP_TEMP/acceptance.log"'),
+  ).toBeGreaterThan(
+    bootstrap.indexOf('stage "Production confirmation"'),
+  );
 
   const check = Bun.spawnSync(["bash", "scripts/bootstrap.sh", "--check"]);
   expect(check.exitCode).toBe(0);

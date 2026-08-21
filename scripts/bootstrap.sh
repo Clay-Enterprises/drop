@@ -298,8 +298,8 @@ if [[ "$MODE" == "verify" ]]; then
   R2_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
   R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
   R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-  bun run scripts/verify-production.ts
-  ACCEPTANCE_STATUS=$?
+  bun run scripts/verify-production.ts 2>&1 | tee "$BOOTSTRAP_TEMP/acceptance.log"
+  ACCEPTANCE_STATUS=${PIPESTATUS[0]}
   set -e
 
   bun run scripts/r2-verification-token.ts revoke "$R2_TOKEN_ID"
@@ -316,6 +316,8 @@ if [[ "$MODE" == "verify" ]]; then
     confirm "Do the logs and production settings match?" || CONFIRMATION_STATUS=$?
   else
     warn "Live acceptance failed. The short-lived R2 token was revoked safely."
+    say "The verifier's final output was:"
+    tail -n 20 "$BOOTSTRAP_TEMP/acceptance.log"
   fi
   say "The temporary Cloudflare token is no longer needed."
   open_url "https://dash.cloudflare.com/profile/api-tokens"
