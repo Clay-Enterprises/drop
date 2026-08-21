@@ -156,6 +156,7 @@ describe("Agent Skills", () => {
 
   test("HTML communication keeps the Doc contract and stable revision path", async () => {
     const contents = (await readSkill("html-communication")).toLowerCase();
+    const forbiddenCapabilities = contents.match(/never include[^\n]+/)?.[0];
 
     for (const required of [
       "512 kib",
@@ -165,7 +166,6 @@ describe("Agent Skills", () => {
       "inline css",
       "inline svg",
       "data or https media",
-      "script-initiated network requests",
       "external or module scripts",
       "inline event handlers",
       "private network urls",
@@ -179,6 +179,10 @@ describe("Agent Skills", () => {
     ]) {
       expect(contents).toContain(required);
     }
+    expect(forbiddenCapabilities).toContain("storage");
+    expect(forbiddenCapabilities).toContain("script-initiated network requests");
+    expect(forbiddenCapabilities).toContain("workers");
+    expect(forbiddenCapabilities).toContain("script-created popups");
     expect(contents).not.toContain("localhost");
   });
 });
