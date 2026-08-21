@@ -21,12 +21,17 @@ import type { CredentialId } from "../shared/upload-keys.ts";
 import {
   changeDropRetention,
   createDrop,
+  deleteDrop,
+  listDrops,
   replaceDrop,
   serveDrop,
   type ChangeDropRetentionResult,
   type DropDescriptor,
+  type DeletedDrop,
+  type ListDropsInput,
   type ReplaceDropResult,
 } from "./drop-content.ts";
+import type { DropInventoryPage } from "../shared/drops.ts";
 
 export const maxDocSize = 512 * 1024;
 export const docContentType: DocContentType = "text/html; charset=utf-8";
@@ -992,6 +997,20 @@ export function createDoc(
     ...input,
     contentType: docContentType,
   });
+}
+
+export function listDocs(
+  store: R2Bucket,
+  input: ListDropsInput,
+): Promise<DropInventoryPage> {
+  return listDrops(store, docDescriptor, input);
+}
+
+export function deleteDoc(
+  store: R2Bucket,
+  opaqueId: OpaqueId,
+): Promise<DeletedDrop | undefined> {
+  return deleteDrop(store, docDescriptor, opaqueId);
 }
 
 export interface ReplaceDocInput extends Omit<CreateDocInput, "retention"> {

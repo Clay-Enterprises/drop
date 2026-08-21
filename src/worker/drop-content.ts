@@ -1,6 +1,8 @@
 import {
   opaqueIdSchema,
   retentionSchema,
+  type DropInventoryEntry,
+  type DropInventoryPage,
   type DropKind,
   type OpaqueId,
   type Retention,
@@ -17,6 +19,109 @@ export interface DropDescriptor<
   readonly kind: Kind;
   readonly parseContentType: (value: unknown) => ContentType;
   readonly publicHeaders?: Readonly<Record<string, string>>;
+}
+
+export interface ListDropsInput {
+  readonly cursor: string | undefined;
+  readonly limit: number;
+  readonly publicOrigin: string;
+}
+
+export async function listDrops<
+  Kind extends DropKind,
+  ContentType extends string,
+>(
+  store: R2Bucket,
+  descriptor: DropDescriptor<Kind, ContentType>,
+  input: ListDropsInput,
+): Promise<DropInventoryPage> {
+  const prefix = `${descriptor.kind}s/`;
+  const page = await store.list({
+    prefix,
+    cursor: input.cursor,
+    limit: input.limit,
+    include: ["customMetadata"],
+  });
+  const drops: DropInventoryEntry[] = [];
+  for (const object of page.objects) {
+    const opaqueId = opaqueIdSchema.safeParse(object.key.slice(prefix.length));
+    const retention = retentionSchema.safeParse(
+      object.customMetadata?.retention,
+    );
+    const owner = credentialIdSchema.safeParse(
+      object.customMetadata?.creatorCredentialId,
+    );
+    if (
+      !opaqueId.success ||
+      !retention.success ||
+      !owner.success ||
+      object.customMetadata?.kind !== descriptor.kind ||
+      object.customMetadata.originalFilename === undefined
+    ) {
+      continue;
+    }
+    let contentType: ContentType;
+    try {
+      contentType = descriptor.parseContentType(
+        object.customMetadata.detectedType,
+      );
+    } catch {
+      continue;
+    }
+    const expiresAt = object.customMetadata.expiresAt ?? null;
+    if (
+      expiresAt !== null &&
+      !Number.isFinite(new Date(expiresAt).getTime())
+    ) {
+      continue;
+    }
+    drops.push({
+      url: new URL(`/${object.key}`, input.publicOrigin).href,
+      kind: descriptor.kind,
+      retention: retention.data,
+      owner: owner.data,
+      uploadedAt: object.uploaded.toISOString(),
+      expiresAt,
+      size: object.size,
+      contentType,
+      originalFilename: object.customMetadata.originalFilename,
+    });
+  }
+  return {
+    drops,
+    cursor: page.truncated ? page.cursor : null,
+  };
+}
+
+export async function deleteDrop<
+  Kind extends DropKind,
+  ContentType extends string,
+>(
+  store: R2Bucket,
+  descriptor: DropDescriptor<Kind, ContentType>,
+  opaqueId: OpaqueId,
+): Promise<DeletedDrop | undefined> {
+  const key = dropKey(descriptor, opaqueId);
+  const current = await store.head(key);
+  if (current?.customMetadata?.kind !== descriptor.kind) {
+    return undefined;
+  }
+  const owner = credentialIdSchema.safeParse(
+    current.customMetadata.creatorCredentialId,
+  );
+  const retention = retentionSchema.safeParse(current.customMetadata.retention);
+  await store.delete(key);
+  return {
+    owner: owner.success ? owner.data : "unknown",
+    retention: retention.success ? retention.data : "unknown",
+    size: current.size,
+  };
+}
+
+export interface DeletedDrop {
+  readonly owner: CredentialId | "unknown";
+  readonly retention: Retention | "unknown";
+  readonly size: number;
 }
 
 export interface DropUploadResponse<

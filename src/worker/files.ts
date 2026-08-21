@@ -10,12 +10,17 @@ import type { CredentialId } from "../shared/upload-keys.ts";
 import {
   changeDropRetention,
   createDrop,
+  deleteDrop,
+  listDrops,
   replaceDrop,
   serveDrop,
   type ChangeDropRetentionResult,
   type DropDescriptor,
+  type DeletedDrop,
+  type ListDropsInput,
   type ReplaceDropResult,
 } from "./drop-content.ts";
+import type { DropInventoryPage } from "../shared/drops.ts";
 
 const fileDescriptor: DropDescriptor<"file", FileContentType> = {
   kind: "file",
@@ -87,6 +92,20 @@ export function createFile(
   input: CreateFileInput,
 ): Promise<FileUploadResponse> {
   return createDrop(store, fileDescriptor, input);
+}
+
+export function listFiles(
+  store: R2Bucket,
+  input: ListDropsInput,
+): Promise<DropInventoryPage> {
+  return listDrops(store, fileDescriptor, input);
+}
+
+export function deleteFile(
+  store: R2Bucket,
+  opaqueId: OpaqueId,
+): Promise<DeletedDrop | undefined> {
+  return deleteDrop(store, fileDescriptor, opaqueId);
 }
 
 export interface ReplaceFileInput extends Omit<CreateFileInput, "retention"> {

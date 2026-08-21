@@ -23,11 +23,14 @@ import {
 } from "../shared/docs.ts";
 import {
   type DropKind,
+  dropKindSchema,
+  dropInventoryPageSchema,
   localBindingSchema,
   opaqueIdSchema,
   retentionSchema,
   type LocalBinding,
   type LocalBindingContent,
+  type DropInventoryEntry,
   type Retention,
 } from "../shared/drops.ts";
 import {
@@ -39,6 +42,7 @@ import {
 } from "../shared/files.ts";
 import type {
   CreatedUploadKey,
+  CredentialId,
   UploadKeySummary,
 } from "../shared/upload-keys.ts";
 import {
@@ -238,6 +242,163 @@ async function revokeUploadKey(credentialIdInput: string): Promise<void> {
     `/api/admin/keys/${credentialId.data}`,
     "DELETE",
   );
+}
+
+async function listDropsByKind(kind: DropKind): Promise<DropInventoryEntry[]> {
+  const drops: DropInventoryEntry[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = cursor === null ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+    const response = await adminRequest(`/api/${kind}s${query}`);
+    const page = dropInventoryPageSchema.parse(await response.json());
+    drops.push(...page.drops);
+    cursor = page.cursor;
+  } while (cursor !== null);
+  return drops;
+}
+
+async function listDrops(): Promise<DropInventoryEntry[]> {
+  const drops = (
+    await Promise.all([listDropsByKind("file"), listDropsByKind("doc")])
+  ).flat();
+  return drops.sort((left, right) => left.url.localeCompare(right.url));
+}
+
+async function deleteDropByUrl(urlInput: string): Promise<string> {
+  const environment = readAdminEnvironment();
+  const parsed = z.url().safeParse(urlInput);
+  if (!parsed.success) {
+    throw new CliError(
+      `The value is not an exact File or Doc Unlisted URL: ${urlInput}`,
+      2,
+    );
+  }
+  const url = new URL(parsed.data);
+  const match = /^\/(files|docs)\/([^/]+)$/.exec(url.pathname);
+  const opaqueId = opaqueIdSchema.safeParse(match?.[2]);
+  const apiOrigin = new URL(environment.DROP_API_URL).origin;
+  if (
+    url.origin !== apiOrigin ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    match === null ||
+    !opaqueId.success
+  ) {
+    throw new CliError(
+      `The value is not an exact File or Doc Unlisted URL: ${urlInput}`,
+      2,
+    );
+  }
+  await adminRequest(`/api/${match[1]}/${opaqueId.data}`, "DELETE");
+  return url.href;
+}
+
+interface AdminListCommand {
+  readonly after: number | undefined;
+  readonly before: number | undefined;
+  readonly json: boolean;
+  readonly kind: DropKind | undefined;
+  readonly owner: CredentialId | undefined;
+  readonly retention: Retention | undefined;
+}
+
+function parseAdminListCommand(
+  arguments_: string[],
+): AdminListCommand | undefined {
+  if (arguments_[0] !== "admin" || arguments_[1] !== "list") {
+    return undefined;
+  }
+  let after: number | undefined;
+  let before: number | undefined;
+  let json = false;
+  let kind: DropKind | undefined;
+  let owner: CredentialId | undefined;
+  let retention: Retention | undefined;
+  for (let index = 2; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (argument === "--json" && !json) {
+      json = true;
+      continue;
+    }
+    const value = arguments_[index + 1];
+    if (argument === "--kind" && kind === undefined) {
+      const parsed = dropKindSchema.safeParse(value);
+      if (!parsed.success) {
+        throw new CliError("--kind must be file or doc.", 2);
+      }
+      kind = parsed.data;
+      index += 1;
+      continue;
+    }
+    if (argument === "--retention" && retention === undefined) {
+      const parsed = retentionSchema.safeParse(value);
+      if (!parsed.success) {
+        throw new CliError(
+          "--retention must be 7d, 30d, 90d, or keep.",
+          2,
+        );
+      }
+      retention = parsed.data;
+      index += 1;
+      continue;
+    }
+    if (argument === "--owner" && owner === undefined) {
+      const parsed = credentialIdSchema.safeParse(value);
+      if (!parsed.success) {
+        throw new CliError("--owner must be a credential ID.", 2);
+      }
+      owner = parsed.data;
+      index += 1;
+      continue;
+    }
+    if (
+      (argument === "--before" || argument === "--after") &&
+      (argument === "--before" ? before : after) === undefined
+    ) {
+      const parsed = z.iso.datetime().safeParse(value);
+      if (!parsed.success) {
+        throw new CliError(`${argument} must be an ISO 8601 timestamp.`, 2);
+      }
+      const time = new Date(parsed.data).getTime();
+      if (argument === "--before") before = time;
+      else after = time;
+      index += 1;
+      continue;
+    }
+    return undefined;
+  }
+  return { after, before, json, kind, owner, retention };
+}
+
+function matchesAdminListFilters(
+  drop: DropInventoryEntry,
+  command: AdminListCommand,
+): boolean {
+  return (
+    (command.kind === undefined || drop.kind === command.kind) &&
+    (command.retention === undefined || drop.retention === command.retention) &&
+    (command.owner === undefined || drop.owner === command.owner) &&
+    (command.before === undefined ||
+      new Date(drop.uploadedAt).getTime() < command.before) &&
+    (command.after === undefined ||
+      new Date(drop.uploadedAt).getTime() > command.after)
+  );
+}
+
+function formatInventoryEntry(drop: DropInventoryEntry): string {
+  return [
+    drop.url,
+    drop.kind,
+    drop.retention,
+    drop.owner,
+    drop.uploadedAt,
+    drop.expiresAt ?? "",
+    String(drop.size),
+    drop.contentType,
+    JSON.stringify(drop.originalFilename),
+  ].join("\t");
 }
 
 function encodedFilename(filename: string): string {
@@ -732,6 +893,31 @@ function parseUploadCommand(arguments_: string[]): UploadCommand | undefined {
 }
 
 async function runAdminCommand(arguments_: string[]): Promise<number> {
+  const listCommand = parseAdminListCommand(arguments_);
+  if (listCommand !== undefined) {
+    const drops = (await listDrops()).filter((drop) =>
+      matchesAdminListFilters(drop, listCommand),
+    );
+    const output = listCommand.json
+      ? JSON.stringify({ drops })
+      : drops.map(formatInventoryEntry).join("\n");
+    if (output !== "") console.log(output);
+    return 0;
+  }
+
+  if (
+    (arguments_.length === 3 ||
+      (arguments_.length === 4 && arguments_[3] === "--json")) &&
+    arguments_[0] === "admin" &&
+    arguments_[1] === "delete"
+  ) {
+    const url = await deleteDropByUrl(arguments_[2] ?? "");
+    if (arguments_[3] === "--json") {
+      console.log(JSON.stringify({ url, deleted: true }));
+    }
+    return 0;
+  }
+
   if (
     (arguments_.length === 4 ||
       (arguments_.length === 5 && arguments_[4] === "--json")) &&

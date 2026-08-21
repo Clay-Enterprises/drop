@@ -12,7 +12,9 @@ import { credentialIdSchema } from "../shared/upload-keys.ts";
 import {
   changeDocRetention,
   createDoc,
+  deleteDoc,
   docContentType,
+  listDocs,
   maxDocSize,
   replaceDoc,
   serveDoc,
@@ -21,12 +23,17 @@ import {
 import {
   changeFileRetention,
   createFile,
+  deleteFile,
   detectFileContentType,
+  listFiles,
   readUploadBody,
   replaceFile,
   serveFile,
 } from "./files.ts";
-import { sweepExpiredDrops } from "./drop-content.ts";
+import {
+  sweepExpiredDrops,
+  type DeletedDrop,
+} from "./drop-content.ts";
 import {
   authenticateUploadKey,
   createUploadKey,
@@ -44,6 +51,11 @@ const environmentSchema = z.object({
   ADMIN_KEY: z.string().startsWith("drop_a_"),
 });
 
+const inventoryQuerySchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(1_000).default(1_000),
+});
+
 const invalidCredential = {
   error: {
     code: "invalid_credential",
@@ -58,6 +70,26 @@ const staleDrop = {
     message: "The Drop changed since this client last observed it.",
   },
 } as const;
+
+function logDropDeletion(
+  deleted: DeletedDrop,
+  kind: "doc" | "file",
+  opaqueId: string,
+  publicOrigin: string,
+): void {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      credentialId: deleted.owner,
+      url: new URL(`/${kind}s/${opaqueId}`, publicOrigin).href,
+      kind,
+      size: deleted.size,
+      retention: deleted.retention,
+      outcome: "deleted",
+      status: 204,
+    }),
+  );
+}
 
 function parseOriginalFilename(
   contentDisposition: string | undefined,
@@ -295,6 +327,120 @@ app.delete("/api/admin/keys/:credentialId", async (context) => {
   }
 
   await revokeUploadKey(context.env.CONTROL_STORE, credentialId.data);
+  return context.body(null, 204);
+});
+
+app.get("/api/files", async (context) => {
+  const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
+  if (context.req.header("Authorization") !== `Bearer ${adminKey}`) {
+    return context.json(invalidCredential, 401);
+  }
+  const query = inventoryQuerySchema.safeParse({
+    cursor: context.req.query("cursor"),
+    limit: context.req.query("limit"),
+  });
+  if (!query.success) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "The inventory cursor or limit is invalid.",
+        },
+      },
+      400,
+    );
+  }
+  return context.json(
+    await listFiles(context.env.CONTENT_STORE, {
+      cursor: query.data.cursor,
+      limit: query.data.limit,
+      publicOrigin: new URL(context.req.url).origin,
+    }),
+  );
+});
+
+app.get("/api/docs", async (context) => {
+  const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
+  if (context.req.header("Authorization") !== `Bearer ${adminKey}`) {
+    return context.json(invalidCredential, 401);
+  }
+  const query = inventoryQuerySchema.safeParse({
+    cursor: context.req.query("cursor"),
+    limit: context.req.query("limit"),
+  });
+  if (!query.success) {
+    return context.json(
+      {
+        error: {
+          code: "invalid_request",
+          message: "The inventory cursor or limit is invalid.",
+        },
+      },
+      400,
+    );
+  }
+  return context.json(
+    await listDocs(context.env.CONTENT_STORE, {
+      cursor: query.data.cursor,
+      limit: query.data.limit,
+      publicOrigin: new URL(context.req.url).origin,
+    }),
+  );
+});
+
+app.delete("/api/files/:opaqueId", async (context) => {
+  const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
+  if (context.req.header("Authorization") !== `Bearer ${adminKey}`) {
+    return context.json(invalidCredential, 401);
+  }
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      { error: { code: "not_found", message: "The File does not exist." } },
+      404,
+    );
+  }
+  const deleted = await deleteFile(context.env.CONTENT_STORE, opaqueId.data);
+  if (deleted === undefined) {
+    return context.json(
+      { error: { code: "not_found", message: "The File does not exist." } },
+      404,
+    );
+  }
+  logDropDeletion(
+    deleted,
+    "file",
+    opaqueId.data,
+    new URL(context.req.url).origin,
+  );
+  return context.body(null, 204);
+});
+
+app.delete("/api/docs/:opaqueId", async (context) => {
+  const { ADMIN_KEY: adminKey } = environmentSchema.parse(context.env);
+  if (context.req.header("Authorization") !== `Bearer ${adminKey}`) {
+    return context.json(invalidCredential, 401);
+  }
+  const opaqueId = opaqueIdSchema.safeParse(context.req.param("opaqueId"));
+  if (!opaqueId.success) {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  const deleted = await deleteDoc(context.env.CONTENT_STORE, opaqueId.data);
+  if (deleted === undefined) {
+    return context.json(
+      { error: { code: "not_found", message: "The Doc does not exist." } },
+      404,
+    );
+  }
+  logDropDeletion(
+    deleted,
+    "doc",
+    opaqueId.data,
+    new URL(context.req.url).origin,
+  );
   return context.body(null, 204);
 });
 
