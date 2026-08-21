@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { z } from "zod";
 
+import packageManifest from "../../package.json" with { type: "json" };
 import { errorResponseSchema } from "../shared/errors.ts";
 import {
   docUploadResponseSchema,
@@ -64,7 +65,7 @@ const uploadKeyConfigurationSchema = z
   .object({ uploadKey: uploadKeySchema })
   .strict();
 
-const version = "0.1.0";
+const version = packageManifest.version;
 
 const help = `Drop Files and Docs at public Unlisted URLs.
 

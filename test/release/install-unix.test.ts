@@ -142,7 +142,7 @@ cp "$DROP_TEST_FIXTURES/\${url##*/}" "$output"
     const installedPath = join(installDirectory, "drop");
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
-    expect(stdout).toBe(`Installed drop v0.1.0 to ${installedPath}\n`);
+    expect(stdout).toBe(`Installed drop to ${installedPath}\n`);
     expect(new Uint8Array(await readFile(installedPath))).toEqual(binary);
     expect((await stat(installedPath)).mode & 0o111).not.toBe(0);
   } finally {

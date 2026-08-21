@@ -7,9 +7,7 @@ if ($architecture -ne "AMD64") {
 }
 
 $asset = "drop-windows-x64.exe"
-$version = if ($env:DROP_VERSION) { $env:DROP_VERSION } else { "v0.1.0" }
-$repository = if ($env:DROP_REPOSITORY) { $env:DROP_REPOSITORY } else { "Clay-Enterprises/drop" }
-$releaseUrl = "https://github.com/$repository/releases/download/$version"
+$releaseUrl = "https://github.com/Clay-Enterprises/drop/releases/latest/download"
 $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) "drop-install-$([guid]::NewGuid())"
 
 New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
@@ -46,7 +44,7 @@ try {
   Copy-Item $binaryPath $stagedPath
   Move-Item -Force $stagedPath $installedPath
 
-  Write-Output "Installed drop $version to $installedPath"
+  Write-Output "Installed drop to $installedPath"
 } finally {
   Remove-Item -Force -Recurse $temporaryDirectory -ErrorAction SilentlyContinue
 }

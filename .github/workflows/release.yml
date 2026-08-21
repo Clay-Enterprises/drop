@@ -14,20 +14,26 @@ jobs:
 
   build:
     needs: checks
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: bun-darwin-arm64
             asset: drop-darwin-arm64
+            runner: macos-15
           - target: bun-darwin-x64-baseline
             asset: drop-darwin-x64
+            runner: macos-15-intel
           - target: bun-linux-arm64
             asset: drop-linux-arm64
+            runner: ubuntu-24.04-arm
           - target: bun-linux-x64-baseline
             asset: drop-linux-x64
+            runner: ubuntu-latest
           - target: bun-windows-x64-baseline
             asset: drop-windows-x64.exe
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -39,8 +45,18 @@ jobs:
         run: test "$GITHUB_REF_NAME" = "v$(bun -p 'require("./package.json").version')"
       - name: Build standalone binary
         run: bun run build:release --target=${{ matrix.target }} --outfile=dist/${{ matrix.asset }}
-      - if: runner.os != 'Windows'
-        run: chmod 0755 dist/${{ matrix.asset }}
+      - name: Start standalone binary
+        if: runner.os != 'Windows'
+        run: |
+          chmod 0755 dist/${{ matrix.asset }}
+          ./dist/${{ matrix.asset }} --version
+          ./dist/${{ matrix.asset }} --help
+      - name: Start standalone binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "./dist/${{ matrix.asset }}" --version
+          & "./dist/${{ matrix.asset }}" --help
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.asset }}

@@ -16,9 +16,7 @@ case "$os-$arch" in
     ;;
 esac
 
-version=${DROP_VERSION:-v0.1.0}
-repository=${DROP_REPOSITORY:-Clay-Enterprises/drop}
-release_url="https://github.com/$repository/releases/download/$version"
+release_url="https://github.com/Clay-Enterprises/drop/releases/latest/download"
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/drop-install.XXXXXX")
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
@@ -68,4 +66,4 @@ cp "$binary_path" "$staged_path"
 chmod 0755 "$staged_path"
 mv -f "$staged_path" "$installed_path"
 
-echo "Installed drop $version to $installed_path"
+echo "Installed drop to $installed_path"

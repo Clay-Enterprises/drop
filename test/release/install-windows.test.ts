@@ -105,7 +105,7 @@ exit $LASTEXITCODE
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain(`Installed drop v0.1.0 to ${installedPath}`);
+    expect(result.stdout).toContain(`Installed drop to ${installedPath}`);
     expect(new Uint8Array(await readFile(installedPath))).toEqual(binary);
   } finally {
     await rm(directory, { force: true, recursive: true });

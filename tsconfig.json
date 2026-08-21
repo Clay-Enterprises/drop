@@ -5,6 +5,7 @@
     "moduleDetection": "force",
     "noEmit": true,
     "noUncheckedIndexedAccess": true,
+    "resolveJsonModule": true,
     "strict": true,
     "target": "ES2023"
   }
