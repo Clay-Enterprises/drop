@@ -3,8 +3,22 @@
   "name": "drop",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-20",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "drop.clay.sh/api/*",
+      "zone_name": "clay.sh"
+    }
+  ],
   "triggers": {
     "crons": ["0 0 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    }
   },
   "r2_buckets": [
     {

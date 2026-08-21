@@ -8,7 +8,10 @@ import {
   type FileContentType,
   type Retention,
 } from "../shared/files.ts";
-import { credentialIdSchema } from "../shared/upload-keys.ts";
+import {
+  credentialIdSchema,
+  type CredentialId,
+} from "../shared/upload-keys.ts";
 import {
   changeDocRetention,
   createDoc,
@@ -71,24 +74,35 @@ const staleDrop = {
   },
 } as const;
 
+interface DropLogEvent {
+  readonly credentialId: CredentialId | "unknown";
+  readonly kind: "doc" | "file";
+  readonly outcome: "created" | "deleted" | "replaced" | "retention_changed";
+  readonly retention: Retention | "unknown";
+  readonly size: number;
+  readonly status: 200 | 201 | 204;
+  readonly url: string;
+}
+
+function logDropEvent(event: DropLogEvent): void {
+  console.log({ timestamp: new Date().toISOString(), ...event });
+}
+
 function logDropDeletion(
   deleted: DeletedDrop,
   kind: "doc" | "file",
   opaqueId: string,
   publicOrigin: string,
 ): void {
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId: deleted.owner,
-      url: new URL(`/${kind}s/${opaqueId}`, publicOrigin).href,
-      kind,
-      size: deleted.size,
-      retention: deleted.retention,
-      outcome: "deleted",
-      status: 204,
-    }),
-  );
+  logDropEvent({
+    credentialId: deleted.owner,
+    url: new URL(`/${kind}s/${opaqueId}`, publicOrigin).href,
+    kind,
+    size: deleted.size,
+    retention: deleted.retention,
+    outcome: "deleted",
+    status: 204,
+  });
 }
 
 function parseOriginalFilename(
@@ -474,18 +488,15 @@ app.post("/api/files", async (context) => {
       retention: retention.retention ?? "keep",
     },
   );
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: created.url,
-      kind: created.kind,
-      size: created.size,
-      retention: created.retention,
-      outcome: "created",
-      status: 201,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: created.url,
+    kind: created.kind,
+    size: created.size,
+    retention: created.retention,
+    outcome: "created",
+    status: 201,
+  });
 
   context.header("Location", created.url);
   return context.json(created, 201);
@@ -516,18 +527,15 @@ app.post("/api/docs", async (context) => {
     publicOrigin: new URL(context.req.url).origin,
     retention: retention.retention ?? "keep",
   });
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: created.url,
-      kind: created.kind,
-      size: created.size,
-      retention: created.retention,
-      outcome: "created",
-      status: 201,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: created.url,
+    kind: created.kind,
+    size: created.size,
+    retention: created.retention,
+    outcome: "created",
+    status: 201,
+  });
   context.header("Location", created.url);
   return context.json(created, 201);
 });
@@ -596,18 +604,15 @@ app.put("/api/docs/:opaqueId", async (context) => {
   if (result.status === "stale") {
     return context.json(staleDrop, 409);
   }
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: result.response.url,
-      kind: result.response.kind,
-      size: result.response.size,
-      retention: result.response.retention,
-      outcome: "replaced",
-      status: 200,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: result.response.url,
+    kind: result.response.kind,
+    size: result.response.size,
+    retention: result.response.retention,
+    outcome: "replaced",
+    status: 200,
+  });
   return context.json(result.response);
 });
 
@@ -679,18 +684,15 @@ app.patch("/api/docs/:opaqueId", async (context) => {
   if (result.status === "stale") {
     return context.json(staleDrop, 409);
   }
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: result.response.url,
-      kind: result.response.kind,
-      size: result.response.size,
-      retention: result.response.retention,
-      outcome: "retention_changed",
-      status: 200,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: result.response.url,
+    kind: result.response.kind,
+    size: result.response.size,
+    retention: result.response.retention,
+    outcome: "retention_changed",
+    status: 200,
+  });
   return context.json(result.response);
 });
 
@@ -773,18 +775,15 @@ app.put("/api/files/:opaqueId", async (context) => {
     return context.json(staleDrop, 409);
   }
 
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: result.response.url,
-      kind: result.response.kind,
-      size: result.response.size,
-      retention: result.response.retention,
-      outcome: "replaced",
-      status: 200,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: result.response.url,
+    kind: result.response.kind,
+    size: result.response.size,
+    retention: result.response.retention,
+    outcome: "replaced",
+    status: 200,
+  });
   return context.json(result.response);
 });
 
@@ -864,18 +863,15 @@ app.patch("/api/files/:opaqueId", async (context) => {
     return context.json(staleDrop, 409);
   }
 
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      credentialId,
-      url: result.response.url,
-      kind: result.response.kind,
-      size: result.response.size,
-      retention: result.response.retention,
-      outcome: "retention_changed",
-      status: 200,
-    }),
-  );
+  logDropEvent({
+    credentialId,
+    url: result.response.url,
+    kind: result.response.kind,
+    size: result.response.size,
+    retention: result.response.retention,
+    outcome: "retention_changed",
+    status: 200,
+  });
   return context.json(result.response);
 });
 

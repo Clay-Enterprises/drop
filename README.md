@@ -120,6 +120,19 @@ Operational limits are intentionally plain:
 - No application rate limiter, custom log sink, inventory search index, or content cache.
 - Public URLs cannot retract copies made by browsers, chat clients, or other downstream systems.
 
+### Provision production
+
+From a clean checkout, run the guided Cloudflare bootstrap:
+
+```console
+bun install --frozen-lockfile
+bun run bootstrap
+```
+
+The wizard creates and verifies the production resources. It pauses for Cloudflare login, cache and response-header rules, a temporary bucket-scoped R2 credential, manual Doc refresh, and final log inspection. It configures the initial Upload Key in the local CLI and stores the Admin Key at `$XDG_CONFIG_HOME/drop/admin-key`, or `~/.config/drop/admin-key` when `XDG_CONFIG_HOME` is unset, with mode `0600`.
+
+`bun run verify:production` reruns the destructive live acceptance checks when supplied the environment variables shown by `bun run verify:production --help`. The verifier cleans up its test Drops and restores the daily schedule before it exits.
+
 ## Develop
 
 Install [Bun](https://bun.sh/), then run:

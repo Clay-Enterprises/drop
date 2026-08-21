@@ -8,11 +8,13 @@
     "drop": "src/cli/index.ts"
   },
   "scripts": {
+    "bootstrap": "bash scripts/bootstrap.sh",
     "build:release": "bun build --compile src/cli/index.ts",
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --host 127.0.0.1:8787",
     "drop": "bun run src/cli/index.ts",
     "test": "bun test",
-    "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.bun.json"
+    "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.bun.json",
+    "verify:production": "bun run scripts/verify-production.ts"
   },
   "dependencies": {
     "acorn": "^8.18.0",
@@ -26,6 +28,7 @@
     "@cloudflare/workers-types": "^5.20260820.1",
     "@types/bun": "^1.4.0",
     "@types/css-tree": "^3.2.0",
+    "aws4fetch": "^1.0.20",
     "ffmpeg-static": "5.3.0",
     "skills": "1.5.23",
     "typescript": "^7.0.2",

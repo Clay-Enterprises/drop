@@ -4,6 +4,6 @@
     "lib": ["ES2023"],
     "types": ["bun"]
   },
-  "include": ["src/cli", "src/shared", "test"],
+  "include": ["scripts", "src/cli", "src/shared", "test"],
   "exclude": ["test/worker-entry.ts"]
 }

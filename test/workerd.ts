@@ -52,6 +52,8 @@ export async function startWorkerd(): Promise<WorkerdServer> {
       "127.0.0.1",
       "--port",
       String(port),
+      "--host",
+      `127.0.0.1:${port}`,
       "--persist-to",
       persistencePath,
       "--test-scheduled",
