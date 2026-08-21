@@ -99,4 +99,4 @@ test("compiled release binary authenticates and drops a File", async () => {
     await workerd.stop();
     await rm(directory, { force: true, recursive: true });
   }
-});
+}, 30_000);

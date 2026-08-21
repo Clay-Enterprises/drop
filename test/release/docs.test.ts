@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 test("release documentation covers the public product and its limits", async () => {
   const license = await readFile(resolve("LICENSE"), "utf8");
-  expect(license).toStartWith("MIT License\n");
+  expect(license.replaceAll("\r\n", "\n")).toStartWith("MIT License\n");
   expect(license).toContain("Copyright (c) 2026 Clay Enterprises");
 
   const manifest = JSON.parse(
