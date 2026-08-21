@@ -107,7 +107,12 @@ export async function startWorkerd(): Promise<WorkerdServer> {
         async stop() {
           await stopProcessTree(process);
           await Promise.all([stdout, stderr]);
-          await rm(persistencePath, { force: true, recursive: true });
+          await rm(persistencePath, {
+            force: true,
+            maxRetries: 10,
+            recursive: true,
+            retryDelay: 100,
+          });
         },
       };
     } catch {
