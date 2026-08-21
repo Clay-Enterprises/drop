@@ -1,6 +1,60 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+test("production bootstrap accepts a bucket with no CORS configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "drop-bootstrap-"));
+  const fakeBin = join(directory, "bin");
+  await mkdir(fakeBin);
+  const bunx = join(fakeBin, "bunx");
+  await writeFile(
+    bunx,
+    `#!/usr/bin/env bash
+case "$*" in
+  "wrangler whoami --json") exit 0 ;;
+  "wrangler whoami --account "*" --json") exit 0 ;;
+  "wrangler r2 bucket info drop-control"|"wrangler r2 bucket info drop-content") exit 0 ;;
+  "wrangler r2 bucket cors list "*)
+    printf 'The CORS configuration does not exist. [code: 10059]\\n' >&2
+    exit 1
+    ;;
+  "wrangler r2 bucket dev-url disable drop-control --force")
+    printf 'reached dev-url configuration\\n'
+    exit 71
+    ;;
+  *) printf 'unexpected bunx call: %s\\n' "$*" >&2; exit 72 ;;
+esac
+`,
+  );
+  await chmod(bunx, 0o700);
+  for (const command of ["bun", "curl", "open"]) {
+    const executable = join(fakeBin, command);
+    await writeFile(executable, "#!/usr/bin/env bash\nexit 0\n");
+    await chmod(executable, 0o700);
+  }
+
+  try {
+    const process = Bun.spawn(["bash", "scripts/bootstrap.sh"], {
+      env: {
+        ...Bun.env,
+        PATH: `${fakeBin}:${Bun.env.PATH ?? ""}`,
+        XDG_CONFIG_HOME: directory,
+      },
+      stdin: "pipe",
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    process.stdin.write(`\n${"a".repeat(32)}\n${"b".repeat(32)}\ny\n`);
+    process.stdin.end();
+    const stdout = await new Response(process.stdout).text();
+    await process.exited;
+
+    expect(stdout).toContain("reached dev-url configuration");
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
 
 test("production bootstrap commands are safe to inspect without Cloudflare access", async () => {
   const manifest = JSON.parse(

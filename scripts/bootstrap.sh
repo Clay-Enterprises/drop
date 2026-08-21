@@ -204,14 +204,21 @@ ensure_bucket() {
   if bunx wrangler r2 bucket info "$bucket" >/dev/null 2>&1; then
     note "$bucket already exists"
   else
-    bunx wrangler r2 bucket create "$bucket"
+    bunx wrangler r2 bucket create "$bucket" --update-config=false
   fi
 }
 
 clear_cors() {
   local bucket="$1"
   local output="$BOOTSTRAP_TEMP/$bucket-cors.txt"
-  bunx wrangler r2 bucket cors list "$bucket" >"$output"
+  if ! bunx wrangler r2 bucket cors list "$bucket" >"$output" 2>&1; then
+    if grep -Fq 'code: 10059' "$output"; then
+      note "$bucket CORS is already empty"
+      return
+    fi
+    sed 's/^/  /' "$output" >&2
+    fail "Could not inspect $bucket CORS configuration."
+  fi
   if grep -Eqi 'no cors|"rules"[[:space:]]*:[[:space:]]*\[\]|^[[:space:]]*\[[[:space:]]*\][[:space:]]*$' "$output"; then
     note "$bucket CORS is already empty"
   else
