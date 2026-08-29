@@ -1,6 +1,6 @@
 {
   "name": "drop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -10,6 +10,7 @@
   "scripts": {
     "bootstrap": "bash scripts/bootstrap.sh",
     "build:release": "bun build --compile src/cli/index.ts",
+    "deploy": "wrangler deploy",
     "dev": "wrangler dev --host 127.0.0.1:8787",
     "drop": "bun run src/cli/index.ts",
     "provision": "bash scripts/bootstrap.sh",

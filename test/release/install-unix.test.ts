@@ -100,7 +100,7 @@ cp "$DROP_TEST_FIXTURES/\${url##*/}" "$output"
     await chmod(curl, 0o755);
 
     const assetName = "drop-darwin-arm64";
-    const binary = new TextEncoder().encode("#!/bin/sh\necho drop 0.1.0\n");
+    const binary = new TextEncoder().encode("#!/bin/sh\necho drop 0.1.1\n");
     await writeFile(join(fixturesDirectory, assetName), binary);
     await writeFile(
       join(fixturesDirectory, "SHA256SUMS"),

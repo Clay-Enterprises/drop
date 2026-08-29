@@ -155,6 +155,8 @@ The revised HTML communication skill retains its existing document contract, wri
 
 The entire repository is public under the MIT license. GitHub Releases publish standalone CLI binaries for macOS ARM64/x64, Linux ARM64/x64, and Windows x64, SHA-256 checksums, a macOS/Linux installer, and a PowerShell installer. No npm or GitHub Package is published.
 
+Standalone CLIs check the latest GitHub Release before a command when their last successful check is at least 24 hours old. After the SHA-256 checksum matches the release manifest, macOS and Linux atomically replace the executable, while Windows completes its staged replacement after the command exits. The explicit `drop update` command bypasses the interval. An immutable package-manager executable installs a newer release in the user's binary directory and delegates later invocations to that copy. Automatic update failures do not block uploads or admin commands.
+
 The dotfiles repository consumes `Clay-Enterprises/drop` as a pinned non-flake source, links both external skills, removes its old local HTML communication skill, and installs a pinned release binary with a fixed checksum.
 
 ## Implementation and tests
@@ -170,5 +172,9 @@ There is one production environment at `drop.clay.sh`. Automated tests never use
 Structured Worker logs contain timestamp, credential ID, resulting URL, kind, size, Retention Class, outcome, and status. They exclude bearer secrets, original filenames, and content. There is no custom log sink or application rate limiter in v1.
 
 A guided bootstrap uses Terraform to adopt and manage the two R2 buckets, public-access controls, Worker route and cron, cache bypass, response headers, and disabled Worker subdomains. It generates and stores the Admin Key without exposing it in shell history, deploys Worker code with Wrangler, creates the initial Upload Key, and configures the local CLI. The only dashboard work is creating and revoking a temporary, scoped provisioning token and inspecting the final logs.
+
+Every push to `main` deploys the Worker after the complete check suite passes. GitHub Actions holds a Cloudflare token scoped to Worker deployment and the public Cloudflare account ID. The deployment preserves Worker secrets and does not run Terraform, change routes, or change schedules.
+
+The same accepted checks plan a CLI release. Changes to CLI, shared, or installer code require an unused package version. CI builds every supported binary and creates the versioned GitHub Release from that accepted commit. Worker-only changes do not publish a CLI release.
 
 The initial delivery publishes `main` to the existing `Clay-Enterprises/drop` repository, creates a `v0.1.0` release, provisions and verifies `drop.clay.sh`, updates and pushes the dotfiles repository, and verifies File, video, Doc, Re-drop, retention, and expiry behavior.

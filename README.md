@@ -25,6 +25,8 @@ The PowerShell installer supports Windows x64, verifies `SHA256SUMS`, and writes
 
 Release assets are standalone binaries. Drop does not publish an npm package or GitHub Package. To verify a manual download, fetch `SHA256SUMS` from the same release and compare its entry with the binary's SHA-256 digest.
 
+Every standalone CLI command checks GitHub Releases when the last successful check is at least 24 hours old. When a newer stable version exists, Drop verifies its release checksum. macOS and Linux replace the executable atomically before continuing, while Windows stages the replacement until the command exits. Automatic checks stay silent and never prevent the requested command from running. `drop update` ignores the daily interval and reports whether it updated the executable. If a package manager keeps the executable in an immutable location such as the Nix store, Drop installs the update under `${DROP_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}` and delegates later commands to that writable copy.
+
 ## Authenticate and use the CLI
 
 Store an Upload Key with mode `0600` on macOS and Linux:
@@ -41,6 +43,7 @@ drop demo.mp4 --retention 30d
 drop report.html --json
 drop retention report.html 90d
 drop retention https://drop.clay.sh/docs/<opaque-id> keep
+drop update
 ```
 
 Dropping the same normalized absolute path again is a Re-drop. It replaces the content at the existing unlisted URL. Moving or copying the local path creates a new Drop. Expiry and explicit deletion are terminal.
@@ -50,6 +53,7 @@ The remaining commands are:
 ```console
 drop --help
 drop --version
+drop update
 drop admin list [--kind file|doc] [--retention 7d|30d|90d|keep] [--owner <credential-id>] [--before <time>] [--after <time>] [--json]
 drop admin delete <url> [--json]
 drop admin keys create [--json]
@@ -139,6 +143,10 @@ Run live acceptance separately:
 ```console
 bun run verify:production
 ```
+
+Pushes to `main` deploy the Worker after every typecheck, test, and release-startup job passes. The deploy job reads `CLOUDFLARE_API_TOKEN` from the repository's GitHub Actions secrets and `CLOUDFLARE_ACCOUNT_ID` from its Actions variables. The token should use Cloudflare's Edit Cloudflare Workers template and be restricted to the `clay.sh` account and zone. Wrangler preserves the existing Admin Key secret while replacing the Worker code and declared bindings.
+
+Run `scripts/setup-ci-deploy.sh` from the repository root to verify the Cloudflare token and store it as the GitHub Actions secret. The wizard uses hidden input and does not write the token locally.
 
 The verification wizard reads the local Admin and Upload Keys, creates a bucket-scoped two-hour R2 credential, and revokes that credential automatically, including after a failed run. It changes only temporary test Drops and credentials. It does not run Terraform, deploy Worker code, or change the daily cron. It pauses for the browser refresh check, final log inspection, and revocation of the temporary Cloudflare token.
 

@@ -1,19 +1,17 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  checks:
-    uses: ./.github/workflows/checks.yml
-
   build:
-    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +40,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Match the tag to package metadata
         shell: bash
-        run: test "$GITHUB_REF_NAME" = "v$(bun -p 'require("./package.json").version')"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: test "$RELEASE_TAG" = "v$(bun -p 'require("./package.json").version')"
       - name: Build standalone binary
         run: bun run build:release --target=${{ matrix.target }} --outfile=dist/${{ matrix.asset }}
       - name: Start standalone binary
@@ -82,4 +82,5 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release create "$RELEASE_TAG" dist/* --generate-notes --target "$GITHUB_SHA" --title "$RELEASE_TAG"

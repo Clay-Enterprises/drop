@@ -47,6 +47,12 @@ import type {
   UploadKeySummary,
 } from "../shared/upload-keys.ts";
 import {
+  standaloneExecutablePath,
+  updateDrop,
+  type UpdateResult,
+  userExecutablePath,
+} from "./update.ts";
+import {
   credentialIdSchema,
   createdUploadKeySchema,
   uploadKeyListSchema,
@@ -72,6 +78,7 @@ const help = `Drop Files and Docs at public Unlisted URLs.
 Usage:
   drop <path> [--retention 7d|30d|90d|keep] [--raw] [--json]
   drop retention <path-or-url> <retention> [--json]
+  drop update
   drop auth set
   drop admin list [--kind file|doc] [--retention <retention>] [--owner <credential-id>] [--before <time>] [--after <time>] [--json]
   drop admin delete <url> [--json]
@@ -87,6 +94,8 @@ Environment:
   DROP_UPLOAD_KEY   Override the stored Upload Key.
   DROP_ADMIN_KEY    Authenticate admin commands.
   DROP_API_URL      Override https://drop.clay.sh.
+  DROP_INSTALL_DIR  Override the writable update destination.
+  XDG_BIN_HOME      Override the user executable directory.
   XDG_CONFIG_HOME   Override the configuration root.
   XDG_STATE_HOME    Override the local binding root.`;
 
@@ -96,6 +105,72 @@ class CliError extends Error {
     readonly exitCode: number,
   ) {
     super(message);
+  }
+}
+
+async function delegateToUserExecutable(
+  arguments_: string[],
+): Promise<number | undefined> {
+  const currentPath = standaloneExecutablePath();
+  const installedPath = userExecutablePath();
+  if (
+    currentPath === undefined ||
+    currentPath === installedPath ||
+    !(await Bun.file(installedPath).exists())
+  ) {
+    return undefined;
+  }
+  try {
+    const child = Bun.spawn([installedPath, ...arguments_], {
+      stderr: "inherit",
+      stdin: "inherit",
+      stdout: "inherit",
+    });
+    return await child.exited;
+  } catch {
+    return undefined;
+  }
+}
+
+async function runAutomaticUpdate(): Promise<UpdateResult | undefined> {
+  if (
+    Bun.env.DROP_API_URL !== undefined &&
+    Bun.env.DROP_API_URL !== "https://drop.clay.sh"
+  ) {
+    return undefined;
+  }
+  try {
+    return await updateDrop({ currentVersion: version });
+  } catch {
+    // Uploads should keep working when GitHub or the local installation is unavailable.
+    return undefined;
+  }
+}
+
+async function runExplicitUpdate(): Promise<void> {
+  try {
+    const result = await updateDrop({ currentVersion: version, force: true });
+    if (result.status === "skipped") {
+      throw new Error(
+        "Run the standalone Drop binary to update it. Source executions cannot update Bun.",
+      );
+    }
+    if (result.status === "current") {
+      console.log(`drop ${result.version} is up to date.`);
+      return;
+    }
+    console.log(
+      result.pendingExit
+        ? `Staged drop ${result.to}. It will replace ${result.from} after this command exits.`
+        : result.relocated
+          ? `Updated drop from ${result.from} to ${result.to} at ${result.executablePath}.`
+          : `Updated drop from ${result.from} to ${result.to}.`,
+    );
+  } catch (error) {
+    throw new CliError(
+      error instanceof Error ? error.message : "The Drop update failed.",
+      1,
+    );
   }
 }
 
@@ -987,6 +1062,24 @@ async function runAdminCommand(arguments_: string[]): Promise<number> {
 }
 
 async function main(arguments_: string[]): Promise<number> {
+  const delegatedExitCode = await delegateToUserExecutable(arguments_);
+  if (delegatedExitCode !== undefined) return delegatedExitCode;
+
+  if (arguments_.join(" ") === "update") {
+    await runExplicitUpdate();
+    return 0;
+  }
+
+  const automaticUpdate = await runAutomaticUpdate();
+  if (
+    automaticUpdate?.status === "updated" &&
+    automaticUpdate.relocated &&
+    !automaticUpdate.pendingExit
+  ) {
+    const updatedExitCode = await delegateToUserExecutable(arguments_);
+    if (updatedExitCode !== undefined) return updatedExitCode;
+  }
+
   if (arguments_.join(" ") === "--help") {
     console.log(help);
     return 0;
@@ -1049,7 +1142,7 @@ async function main(arguments_: string[]): Promise<number> {
   }
 
   throw new CliError(
-    "Usage: drop <path> [--retention 7d|30d|90d|keep] [--raw] [--json] | drop retention <path-or-url> <retention> [--json] | drop auth set",
+    "Usage: drop <path> [--retention 7d|30d|90d|keep] [--raw] [--json] | drop retention <path-or-url> <retention> [--json] | drop update | drop auth set",
     2,
   );
 }

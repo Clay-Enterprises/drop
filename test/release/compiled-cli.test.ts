@@ -19,8 +19,11 @@ async function runExecutable(
   environment: Record<string, string>,
   stdin = "",
 ): Promise<CommandResult> {
+  const inheritedEnvironment = { ...Bun.env };
+  delete inheritedEnvironment.DROP_ADMIN_KEY;
+  delete inheritedEnvironment.DROP_UPLOAD_KEY;
   const child = Bun.spawn([executable, ...arguments_], {
-    env: { ...Bun.env, ...environment },
+    env: { ...inheritedEnvironment, ...environment },
     stdin: "pipe",
     stderr: "pipe",
     stdout: "pipe",
@@ -62,7 +65,7 @@ test("compiled release binary authenticates and drops a File", async () => {
     expect(await runExecutable(executable, ["--version"], environment)).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: "drop 0.1.0\n",
+      stdout: "drop 0.1.1\n",
     });
     expect((await runExecutable(executable, ["--help"], environment)).stdout).toContain(
       "drop auth set",
@@ -88,8 +91,8 @@ test("compiled release binary authenticates and drops a File", async () => {
     const filePath = join(directory, "pixel.png");
     await writeFile(filePath, onePixelPng);
     const dropped = await runExecutable(executable, [filePath], environment);
-    expect(dropped.exitCode).toBe(0);
     expect(dropped.stderr).toBe("");
+    expect(dropped.exitCode).toBe(0);
     const url = dropped.stdout.trim();
     expect(url).toMatch(new RegExp(`^${workerd.url}/files/[A-Za-z0-9_-]{32}$`));
     expect(new Uint8Array(await (await fetch(url)).arrayBuffer())).toEqual(

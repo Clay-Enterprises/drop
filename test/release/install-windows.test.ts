@@ -64,7 +64,7 @@ test("PowerShell installer verifies and installs the Windows release asset", asy
     await mkdir(fixturesDirectory);
 
     const assetName = "drop-windows-x64.exe";
-    const binary = new TextEncoder().encode("drop 0.1.0\r\n");
+    const binary = new TextEncoder().encode("drop 0.1.1\r\n");
     await writeFile(join(fixturesDirectory, assetName), binary);
     await writeFile(
       join(fixturesDirectory, "SHA256SUMS"),

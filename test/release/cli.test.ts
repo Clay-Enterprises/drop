@@ -26,7 +26,7 @@ describe("release CLI", () => {
     expect(await runCli(["--version"])).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: "drop 0.1.0\n",
+      stdout: "drop 0.1.1\n",
     });
   });
 
@@ -35,7 +35,7 @@ describe("release CLI", () => {
       await readFile(resolve("package.json"), "utf8"),
     ) as Record<string, unknown>;
 
-    expect(manifest.version).toBe("0.1.0");
+    expect(manifest.version).toBe("0.1.1");
     expect(manifest.private).toBe(true);
     expect(manifest.publishConfig).toBeUndefined();
   });
@@ -48,6 +48,7 @@ describe("release CLI", () => {
     for (const command of [
       "drop <path>",
       "drop retention <path-or-url> <retention>",
+      "drop update",
       "drop auth set",
       "drop admin list",
       "drop admin delete <url>",
@@ -60,7 +61,18 @@ describe("release CLI", () => {
     expect(result.stdout).toContain("DROP_UPLOAD_KEY");
     expect(result.stdout).toContain("DROP_ADMIN_KEY");
     expect(result.stdout).toContain("DROP_API_URL");
+    expect(result.stdout).toContain("DROP_INSTALL_DIR");
+    expect(result.stdout).toContain("XDG_BIN_HOME");
     expect(result.stdout).toContain("XDG_CONFIG_HOME");
     expect(result.stdout).toContain("XDG_STATE_HOME");
+  });
+
+  test("refuses to replace the Bun runtime during source execution", async () => {
+    expect(await runCli(["update"])).toEqual({
+      exitCode: 1,
+      stderr:
+        "error: Run the standalone Drop binary to update it. Source executions cannot update Bun.\n",
+      stdout: "",
+    });
   });
 });

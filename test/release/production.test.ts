@@ -8,6 +8,7 @@ test("production bootstrap commands are safe to inspect without Cloudflare acces
   ) as { scripts?: Record<string, string> };
 
   expect(manifest.scripts?.bootstrap).toBe("bash scripts/bootstrap.sh");
+  expect(manifest.scripts?.deploy).toBe("wrangler deploy");
   expect(manifest.scripts?.provision).toBe("bash scripts/bootstrap.sh");
   expect(manifest.scripts?.["verify:production"]).toBe(
     "bash scripts/bootstrap.sh --verify",

@@ -20,6 +20,8 @@ The CLI processes MP4 and WebM video with FFmpeg by default. Use `--raw` only wh
 3. Run `drop <path>`, quoting the real path for the active shell. Add `--retention 7d`, `30d`, `90d`, or `keep` only when the user requests a Retention Class. Add `--raw` only for the video case above.
 4. Return the Unlisted URL printed on stdout. An Unlisted URL is appropriate for proprietary material, but not secrets.
 
+The CLI checks GitHub Releases for an update at most once per day before running a command. Run `drop update` only when the user asks for an immediate update check.
+
 If the CLI reports that no Upload Key is configured, keep the local artifact and report the exact setup choices: run `drop auth set` or set `DROP_UPLOAD_KEY`. For any other failure, keep the artifact and report the CLI error. A failed CLI invocation never authorizes another upload method.
 
 Running `drop` again with the same local path performs a Re-drop and preserves the live File or Doc URL. Expiry or explicit deletion is terminal, so the next drop at that path creates a new URL.

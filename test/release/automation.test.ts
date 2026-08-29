@@ -24,8 +24,7 @@ test("accepted checks gate a checksummed five-platform release", async () => {
   }
 
   const release = await readWorkflow("release.yml");
-  expect(release).toContain("uses: ./.github/workflows/checks.yml");
-  expect(release).toMatch(/build:\s+needs: checks/);
+  expect(release).toContain("workflow_call:");
   expect(release).toMatch(/publish:\s+needs: build/);
   for (const [target, asset, runner] of [
     ["bun-darwin-arm64", "drop-darwin-arm64", "macos-15"],
@@ -47,5 +46,46 @@ test("accepted checks gate a checksummed five-platform release", async () => {
   expect(release).toContain("install.sh");
   expect(release).toContain("install.ps1");
   expect(release).toContain("gh release create");
+  expect(release).toContain('--target "$GITHUB_SHA"');
   expect(release).not.toMatch(/npm publish|packages: write/i);
+});
+
+test("accepted main checks deploy the production Worker", async () => {
+  const checks = await readWorkflow("checks.yml");
+
+  expect(checks).toContain("deploy-production:");
+  expect(checks).toContain(
+    "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+  );
+  for (const requiredJob of [
+    "typecheck",
+    "bun-tests",
+    "worker-integration",
+    "skill-smoke",
+    "release-startup",
+  ]) {
+    expect(checks).toContain(`      - ${requiredJob}`);
+  }
+  expect(checks).toContain("group: drop-production");
+  expect(checks).toContain(
+    "CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}",
+  );
+  expect(checks).toContain(
+    "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
+  );
+  expect(checks).toContain("run: bun run deploy");
+});
+
+test("accepted CLI changes publish the package version once", async () => {
+  const checks = await readWorkflow("checks.yml");
+
+  expect(checks).toContain("prepare-cli-release:");
+  expect(checks).toContain("group: ${{ github.workflow }}-${{ github.ref }}");
+  expect(checks).toContain("git describe --tags --match 'v[0-9]*' --abbrev=0");
+  expect(checks).toContain("src/cli src/shared install.sh install.ps1");
+  expect(checks).toContain(
+    "CLI code changed, but $tag already exists. Bump package.json version.",
+  );
+  expect(checks).toContain("uses: ./.github/workflows/release.yml");
+  expect(checks).toContain("tag: ${{ needs.prepare-cli-release.outputs.tag }}");
 });
