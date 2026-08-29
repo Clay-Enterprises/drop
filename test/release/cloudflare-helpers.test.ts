@@ -210,7 +210,9 @@ test("R2 verification token helper creates scoped credentials and revokes them",
     const createError = await new Response(creation.stderr).text();
     expect(await creation.exited).toBe(0);
     expect(`${createOutput}${createError}`).not.toContain(tokenValue);
-    expect((await stat(envFile)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect((await stat(envFile)).mode & 0o777).toBe(0o600);
+    }
     expect(await readFile(envFile, "utf8")).toBe(
       `R2_ACCESS_KEY_ID=${tokenId}\n` +
         `R2_SECRET_ACCESS_KEY=${createHash("sha256").update(tokenValue).digest("hex")}\n` +
