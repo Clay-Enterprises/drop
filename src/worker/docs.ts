@@ -198,6 +198,10 @@ const scriptedCssPropertyNames = new Set([
 
 class InvalidDoc extends Error {}
 
+export type DocValidationResult =
+  | { readonly valid: true }
+  | { readonly reason: string; readonly valid: false };
+
 function isPrivateHostname(hostnameInput: string): boolean {
   const hostname = hostnameInput
     .toLowerCase()
@@ -322,10 +326,21 @@ function validateRemoteUrl(valueInput: string, allowData: boolean): void {
   try {
     url = new URL(value);
   } catch {
-    throw new InvalidDoc();
+    throw new InvalidDoc(
+      allowData
+        ? "media URLs must use data: or public HTTPS URLs."
+        : "links must use public HTTPS URLs or same-document fragments.",
+    );
   }
-  if (url.protocol !== "https:" || isPrivateHostname(url.hostname)) {
-    throw new InvalidDoc();
+  if (url.protocol !== "https:") {
+    throw new InvalidDoc(
+      allowData
+        ? "media URLs must use data: or public HTTPS URLs."
+        : "links must use public HTTPS URLs or same-document fragments.",
+    );
+  }
+  if (isPrivateHostname(url.hostname)) {
+    throw new InvalidDoc("private-network URLs are not allowed.");
   }
 }
 
@@ -348,7 +363,7 @@ function validateCss(
     parseCustomProperty: true,
     onParseError() {
       if (rejectInvalidSyntax) {
-        throw new InvalidDoc();
+        throw new InvalidDoc("its CSS is invalid.");
       }
     },
   });
@@ -357,12 +372,14 @@ function validateCss(
       node.type === "Atrule" &&
       decodeCssIdentifier(node.name).toLowerCase() === "import"
     ) {
-      throw new InvalidDoc();
+      throw new InvalidDoc("CSS imports are not allowed.");
     }
     if (node.type === "Url") {
       if (!node.value.startsWith("#")) {
         if (!allowRemoteMedia) {
-          throw new InvalidDoc();
+          throw new InvalidDoc(
+            "scripts may not create CSS that loads remote resources.",
+          );
         }
         validateRemoteUrl(node.value, true);
       }
@@ -378,7 +395,9 @@ function validateCss(
       )
     ) {
       if (!allowRemoteMedia) {
-        throw new InvalidDoc();
+        throw new InvalidDoc(
+          "scripts may not create CSS that loads remote resources.",
+        );
       }
       validateRemoteUrl(node.value, true);
     }
@@ -537,13 +556,13 @@ function validateScriptMember(
 ): void {
   const name = memberName(member);
   if (forbiddenScriptMembers.has(name ?? "")) {
-    throw new InvalidDoc();
+    throw new InvalidDoc("scripts may not access restricted browser APIs.");
   }
   if (
     inspectedScriptMethods.has(name ?? "") &&
     (parent?.type !== "CallExpression" || parent.callee !== member)
   ) {
-    throw new InvalidDoc();
+    throw new InvalidDoc("scripts may not alias DOM mutation methods.");
   }
   if (
     name === undefined &&
@@ -552,7 +571,7 @@ function validateScriptMember(
       (parent?.type === "AssignmentExpression" && parent.left === member) ||
       (parent?.type === "UpdateExpression" && parent.argument === member))
   ) {
-    throw new InvalidDoc();
+    throw new InvalidDoc("scripts may not call dynamically computed members.");
   }
 }
 
@@ -585,7 +604,7 @@ function validateScriptCall(
       callback?.type === "SpreadElement" ||
       staticString(callback, staticStrings) !== undefined
     ) {
-      throw new InvalidDoc();
+      throw new InvalidDoc("string timer callbacks are not allowed.");
     }
     return;
   }
@@ -594,7 +613,7 @@ function validateScriptCall(
   }
   const name = memberName(node.callee);
   if (name === "click" || name === "dispatchEvent") {
-    throw new InvalidDoc();
+    throw new InvalidDoc("scripts may not activate links or dispatch events.");
   }
   if (
     [
@@ -632,7 +651,9 @@ function validateScriptCall(
           ? undefined
           : staticString(argument, staticStrings);
         if (value === undefined) {
-          throw new InvalidDoc();
+          throw new InvalidDoc(
+            "scripts may only write static text into script and style elements.",
+          );
         }
         validateScriptGeneratedText(elementName, value, elementsById);
       }
@@ -644,7 +665,9 @@ function validateScriptCall(
           ? undefined
           : staticString(argument, staticStrings);
         if (value === undefined) {
-          throw new InvalidDoc();
+          throw new InvalidDoc(
+            "scripts may only append static text when the target element is unknown.",
+          );
         }
         validateCss(value, "stylesheet", false, false);
       }
@@ -661,7 +684,9 @@ function validateScriptCall(
       elementName === "style" ||
       forbiddenElements.has(elementName)
     ) {
-      throw new InvalidDoc();
+      throw new InvalidDoc(
+        "scripts may only create known, permitted elements.",
+      );
     }
     return;
   }
@@ -678,7 +703,9 @@ function validateScriptCall(
       ? undefined
       : staticString(value, staticStrings);
     if (propertyName === undefined || propertyValue === undefined) {
-      throw new InvalidDoc();
+      throw new InvalidDoc(
+        "scripts may only set known CSS properties to static values.",
+      );
     }
     validateCss(`${propertyName}:${propertyValue}`, "declarationList", false);
     return;
@@ -690,21 +717,25 @@ function validateScriptCall(
       ? undefined
       : staticString(nameArgument, staticStrings);
   if (attributeName === undefined) {
-    throw new InvalidDoc();
+    throw new InvalidDoc("scripts may only set statically known attributes.");
   }
   const normalizedAttributeName = attributeName.toLowerCase();
   if (
     normalizedAttributeName.startsWith("on") ||
     networkAttributeNames.has(normalizedAttributeName)
   ) {
-    throw new InvalidDoc();
+    throw new InvalidDoc(
+      "scripts may not create event handlers or URL-bearing attributes.",
+    );
   }
   if (normalizedAttributeName === "style") {
     const style = valueArgument?.type === "SpreadElement"
       ? undefined
       : staticString(valueArgument, staticStrings);
     if (style === undefined) {
-      throw new InvalidDoc();
+      throw new InvalidDoc(
+        "scripts may only set style attributes to static CSS.",
+      );
     }
     validateCss(style, "declarationList", false);
   }
@@ -714,10 +745,15 @@ function validateScript(
   script: string,
   elementsById: ReadonlyMap<string, string> = new Map(),
 ): void {
-  const ast = parseScript(script, {
-    ecmaVersion: "latest",
-    sourceType: "script",
-  });
+  let ast: ReturnType<typeof parseScript>;
+  try {
+    ast = parseScript(script, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+    });
+  } catch {
+    throw new InvalidDoc("its JavaScript is invalid.");
+  }
   const scopeManager = analyzeScriptScopes(
     ast as unknown as import("estree").Program,
     { ecmaVersion: 2024, sourceType: "script" },
@@ -788,14 +824,14 @@ function validateScript(
   walkScript(ast, (node, _state, ancestors) => {
     const parent = ancestors.at(-2);
     if (node.type === "ImportExpression") {
-      throw new InvalidDoc();
+      throw new InvalidDoc("dynamic JavaScript imports are not allowed.");
     }
     if (
       node.type === "Identifier" &&
       unresolvedIdentifiers.has(node) &&
       forbiddenScriptIdentifiers.has(node.name)
     ) {
-      throw new InvalidDoc();
+      throw new InvalidDoc("scripts may not use restricted browser APIs.");
     }
     if (node.type === "MemberExpression") {
       validateScriptMember(node, parent);
@@ -814,7 +850,7 @@ function validateScript(
         node.callee.type === "Identifier" &&
         forbiddenScriptIdentifiers.has(node.callee.name)
       ) {
-        throw new InvalidDoc();
+        throw new InvalidDoc("scripts may not use restricted browser APIs.");
       }
     }
     if (
@@ -823,7 +859,7 @@ function validateScript(
     ) {
       const name = memberName(node.left) ?? "";
       if (networkAttributeNames.has(name)) {
-        throw new InvalidDoc();
+        throw new InvalidDoc("scripts may not assign URL-bearing properties.");
       }
       if (
         scriptedCssPropertyNames.has(name) ||
@@ -832,7 +868,9 @@ function validateScript(
       ) {
         const value = staticString(node.right, staticStrings);
         if (value === undefined) {
-          throw new InvalidDoc();
+          throw new InvalidDoc(
+            "scripts may only assign static CSS values.",
+          );
         }
         validateCss(`${name}:${value}`, "declarationList", false);
       }
@@ -849,13 +887,17 @@ function validateScript(
         if (elementName === "script" || elementName === "style") {
           const value = staticString(node.right, staticStrings);
           if (value === undefined) {
-            throw new InvalidDoc();
+            throw new InvalidDoc(
+              "scripts may only write static text into script and style elements.",
+            );
           }
           validateScriptGeneratedText(elementName, value, elementsById);
         } else if (elementName === undefined) {
           const value = staticString(node.right, staticStrings);
           if (value === undefined) {
-            throw new InvalidDoc();
+            throw new InvalidDoc(
+              "scripts may only write static text when the target element is unknown.",
+            );
           }
           validateCss(value, "stylesheet", false, false);
         }
@@ -867,27 +909,27 @@ function validateScript(
 function validateElement(element: Element): void {
   const tagName = element.tagName.toLowerCase();
   if (forbiddenElements.has(tagName)) {
-    throw new InvalidDoc();
+    throw new InvalidDoc(`${tagName} elements are not allowed.`);
   }
 
   for (const attribute of element.attributes) {
     const name = attribute[0]?.toLowerCase();
     const value = attribute[1] ?? "";
-    if (
-      name === undefined ||
-      name.startsWith("on") ||
-      name === "formaction" ||
-      name === "ping" ||
-      name === "srcdoc"
-    ) {
-      throw new InvalidDoc();
+    if (name === undefined) {
+      throw new InvalidDoc("every HTML attribute must have a name.");
+    }
+    if (name.startsWith("on")) {
+      throw new InvalidDoc("inline event handlers are not allowed.");
+    }
+    if (name === "formaction" || name === "ping" || name === "srcdoc") {
+      throw new InvalidDoc(`${name} attributes are not allowed.`);
     }
     if (name === "style") {
       validateCss(value, "declarationList");
     }
     if (mediaUrlAttributes.has(name)) {
       if (tagName === "script") {
-        throw new InvalidDoc();
+        throw new InvalidDoc("external scripts are not allowed.");
       }
       validateRemoteUrl(value, true);
     }
@@ -901,7 +943,7 @@ function validateElement(element: Element): void {
     }
     if (name === "href") {
       if (tagName === "link") {
-        throw new InvalidDoc();
+        throw new InvalidDoc("linked resources are not allowed.");
       }
       if (!value.trim().startsWith("#")) {
         validateRemoteUrl(value, tagName !== "a");
@@ -913,26 +955,38 @@ function validateElement(element: Element): void {
     tagName === "meta" &&
     element.getAttribute("http-equiv")?.trim().toLowerCase() === "refresh"
   ) {
-    throw new InvalidDoc();
+    throw new InvalidDoc("meta refresh is not allowed.");
   }
   if (tagName === "script") {
     const type = element.getAttribute("type")?.trim().toLowerCase();
     if (type === "module") {
-      throw new InvalidDoc();
+      throw new InvalidDoc("module scripts are not allowed.");
     }
   }
 }
 
 /** Validates the browser-visible Doc contract without rewriting submitted HTML. */
-export async function validateDocHtml(html: string): Promise<boolean> {
+export async function validateDocHtml(html: string): Promise<DocValidationResult> {
   const elementsById = new Map<string, string>();
   const scripts: string[] = [];
   const styles: string[] = [];
+  let invalidReason: string | undefined;
   try {
     const rewritten = new HTMLRewriter()
       .on("*", {
         element(element) {
-          validateElement(element);
+          if (invalidReason !== undefined) {
+            return;
+          }
+          try {
+            validateElement(element);
+          } catch (error) {
+            if (error instanceof InvalidDoc) {
+              invalidReason = error.message;
+              return;
+            }
+            throw error;
+          }
           const id = element.getAttribute("id");
           if (id !== null && !elementsById.has(id)) {
             elementsById.set(id, element.tagName.toLowerCase());
@@ -963,15 +1017,24 @@ export async function validateDocHtml(html: string): Promise<boolean> {
         }),
       );
     await rewritten.arrayBuffer();
+    if (invalidReason !== undefined) {
+      return { valid: false, reason: invalidReason };
+    }
     for (const style of styles) {
       validateCss(style, "stylesheet");
     }
     for (const script of scripts) {
       validateScript(script, elementsById);
     }
-    return true;
-  } catch {
-    return false;
+    return { valid: true };
+  } catch (error) {
+    return {
+      valid: false,
+      reason:
+        error instanceof InvalidDoc
+          ? error.message
+          : "its HTML, CSS, or JavaScript could not be parsed.",
+    };
   }
 }
 

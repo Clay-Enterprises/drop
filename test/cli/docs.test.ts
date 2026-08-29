@@ -121,6 +121,27 @@ describe("drop Doc", () => {
     });
   });
 
+  test("names the HTML communication contract rule when rejecting a Doc", async () => {
+    const directory = await temporaryDirectory();
+    const uploadKey = await createUploadKey(workerd);
+    await writeFile(
+      join(directory, "communication.html"),
+      '<!doctype html><script src="https://example.com/app.js"></script>',
+    );
+
+    const result = await runCli(workerd, ["communication.html"], {
+      cwd: directory,
+      uploadKey: uploadKey.key,
+    });
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stderr:
+        "error: The submitted Doc violates the HTML communication contract because external scripts are not allowed.\n",
+      stdout: "",
+    });
+  });
+
   test("Re-drops and changes retention at the Doc's existing URL", async () => {
     const directory = await temporaryDirectory();
     const uploadKey = await createUploadKey(workerd);

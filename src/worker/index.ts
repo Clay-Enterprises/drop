@@ -274,17 +274,18 @@ async function readDocUploadRequest(
       status: "error",
       response: jsonError(
         "invalid_doc",
-        "The submitted Doc violates the HTML communication contract.",
+        "The submitted Doc violates the HTML communication contract because it is not valid UTF-8.",
         422,
       ),
     };
   }
-  if (!(await validateDocHtml(html))) {
+  const validation = await validateDocHtml(html);
+  if (!validation.valid) {
     return {
       status: "error",
       response: jsonError(
         "invalid_doc",
-        "The submitted Doc violates the HTML communication contract.",
+        `The submitted Doc violates the HTML communication contract because ${validation.reason}`,
         422,
       ),
     };

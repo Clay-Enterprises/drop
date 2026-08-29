@@ -123,7 +123,7 @@ describe("Doc creation and public reads", () => {
     expect(await publicResponse.text()).toBe(html);
   });
 
-  test("rejects every forbidden Doc capability with a content-free 422", async () => {
+  test("rejects every forbidden Doc capability with a content-free reason", async () => {
     const uploadKey = await createUploadKey(workerd);
     const forbiddenDocs = [
       ["external scripts", '<script src="https://example.com/app.js"></script>'],
@@ -318,12 +318,16 @@ describe("Doc creation and public reads", () => {
       const responseText = await response.text();
 
       expect(response.status, capability).toBe(422);
-      expect(JSON.parse(responseText), capability).toEqual({
-        error: {
-          code: "invalid_doc",
-          message: "The submitted Doc violates the HTML communication contract.",
-        },
-      });
+      const body = JSON.parse(responseText) as {
+        error: { code: string; message: string };
+      };
+      expect(body.error.code, capability).toBe("invalid_doc");
+      expect(body.error.message, capability).toStartWith(
+        "The submitted Doc violates the HTML communication contract because ",
+      );
+      expect(body.error.message, capability).not.toEndWith(
+        "could not be parsed.",
+      );
       expect(responseText, capability).not.toContain(marker);
       expect(responseText, capability).not.toContain(fragment);
     }
@@ -469,7 +473,8 @@ describe("Doc creation and public reads", () => {
     expect(await invalidUtf8Response.json()).toEqual({
       error: {
         code: "invalid_doc",
-        message: "The submitted Doc violates the HTML communication contract.",
+        message:
+          "The submitted Doc violates the HTML communication contract because it is not valid UTF-8.",
       },
     });
 
