@@ -15,10 +15,11 @@ test("accepted checks gate a checksummed five-platform release", async () => {
     "bun test test/worker",
     "bun test test/skills.test.ts",
     "bun test test/release",
-    "ubuntu-24.04-arm",
-    "macos-15",
-    "macos-15-intel",
-    "windows-latest",
+    "blacksmith-2vcpu-ubuntu-2404-arm",
+    "blacksmith-6vcpu-macos-15",
+    "bun-darwin-x64-baseline.zip",
+    "--install-rosetta",
+    "blacksmith-2vcpu-windows-2025",
   ]) {
     expect(checks).toContain(required);
   }
@@ -27,11 +28,11 @@ test("accepted checks gate a checksummed five-platform release", async () => {
   expect(release).toContain("workflow_call:");
   expect(release).toMatch(/publish:\s+needs: build/);
   for (const [target, asset, runner] of [
-    ["bun-darwin-arm64", "drop-darwin-arm64", "macos-15"],
-    ["bun-darwin-x64-baseline", "drop-darwin-x64", "macos-15-intel"],
-    ["bun-linux-arm64", "drop-linux-arm64", "ubuntu-24.04-arm"],
-    ["bun-linux-x64-baseline", "drop-linux-x64", "ubuntu-latest"],
-    ["bun-windows-x64-baseline", "drop-windows-x64.exe", "windows-latest"],
+    ["bun-darwin-arm64", "drop-darwin-arm64", "blacksmith-6vcpu-macos-15"],
+    ["bun-darwin-x64-baseline", "drop-darwin-x64", "blacksmith-6vcpu-macos-15"],
+    ["bun-linux-arm64", "drop-linux-arm64", "blacksmith-2vcpu-ubuntu-2404-arm"],
+    ["bun-linux-x64-baseline", "drop-linux-x64", "blacksmith-2vcpu-ubuntu-2404"],
+    ["bun-windows-x64-baseline", "drop-windows-x64.exe", "blacksmith-2vcpu-windows-2025"],
   ]) {
     expect(release).toContain(`target: ${target}`);
     expect(release).toContain(`asset: ${asset}`);

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -25,7 +25,7 @@ jobs:
       - run: bun run typecheck
 
   bun-tests:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -35,7 +35,7 @@ jobs:
       - run: bun test test/cli
 
   worker-integration:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -45,7 +45,7 @@ jobs:
       - run: bun test test/worker
 
   skill-smoke:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -58,18 +58,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner:
-          - ubuntu-latest
-          - ubuntu-24.04-arm
-          - macos-15
-          - macos-15-intel
-          - windows-latest
+        include:
+          - runner: blacksmith-2vcpu-ubuntu-2404
+          - runner: blacksmith-2vcpu-ubuntu-2404-arm
+          - runner: blacksmith-6vcpu-macos-15
+          - runner: blacksmith-6vcpu-macos-15
+            bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64-baseline.zip
+          - runner: blacksmith-2vcpu-windows-2025
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Enable Intel Mac tests through Rosetta
+        if: matrix.bun-download-url != ''
+        run: arch -x86_64 /usr/bin/true || sudo softwareupdate --install-rosetta --agree-to-license
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+          bun-download-url: ${{ matrix.bun-download-url }}
       - run: bun install --frozen-lockfile
       - run: bun test test/release
 
@@ -81,7 +86,7 @@ jobs:
       - worker-integration
       - skill-smoke
       - release-startup
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     environment:
       name: production
@@ -109,7 +114,7 @@ jobs:
       - worker-integration
       - skill-smoke
       - release-startup
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       release: ${{ steps.release.outputs.release }}
       tag: ${{ steps.release.outputs.tag }}

@@ -18,22 +18,25 @@ jobs:
         include:
           - target: bun-darwin-arm64
             asset: drop-darwin-arm64
-            runner: macos-15
+            runner: blacksmith-6vcpu-macos-15
           - target: bun-darwin-x64-baseline
             asset: drop-darwin-x64
-            runner: macos-15-intel
+            runner: blacksmith-6vcpu-macos-15
           - target: bun-linux-arm64
             asset: drop-linux-arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
           - target: bun-linux-x64-baseline
             asset: drop-linux-x64
-            runner: ubuntu-latest
+            runner: blacksmith-2vcpu-ubuntu-2404
           - target: bun-windows-x64-baseline
             asset: drop-windows-x64.exe
-            runner: windows-latest
+            runner: blacksmith-2vcpu-windows-2025
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Enable Intel Mac binary startup through Rosetta
+        if: matrix.target == 'bun-darwin-x64-baseline'
+        run: arch -x86_64 /usr/bin/true || sudo softwareupdate --install-rosetta --agree-to-license
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -65,7 +68,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
