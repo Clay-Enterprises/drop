@@ -749,6 +749,8 @@ function validateScript(
   try {
     ast = parseScript(script, {
       ecmaVersion: "latest",
+      // eslint-scope reads node ranges when resolving function-scope references.
+      ranges: true,
       sourceType: "script",
     });
   } catch {

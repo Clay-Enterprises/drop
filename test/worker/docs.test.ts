@@ -123,6 +123,20 @@ describe("Doc creation and public reads", () => {
     expect(await publicResponse.text()).toBe(html);
   });
 
+  test("publishes scripts whose functions reference their own scope", async () => {
+    const uploadKey = await createUploadKey(workerd);
+    const html =
+      "<!doctype html><title>Scoped</title><p id=\"total\"></p><script>(function () { var base = 1; function add(value) { const offset = 2; return value + offset + base; } document.getElementById(\"total\").textContent = String(add(3)); })();</script>";
+
+    const response = await fetch(`${workerd.url}/api/docs`, {
+      body: html,
+      headers: uploadHeaders(uploadKey.key),
+      method: "POST",
+    });
+
+    expect(response.status, await response.clone().text()).toBe(201);
+  });
+
   test("rejects every forbidden Doc capability with a content-free reason", async () => {
     const uploadKey = await createUploadKey(workerd);
     const forbiddenDocs = [
@@ -164,6 +178,10 @@ describe("Doc creation and public reads", () => {
       [
         "scripted network requests",
         "<script>fetch('https://example.com/private')</script>",
+      ],
+      [
+        "scripted network requests inside functions",
+        "<script>function load(path) { const base = 'https://example.com/'; fetch(base + path); } load('private');</script>",
       ],
       ["workers", "<script>new Worker('data:text/javascript,')</script>"],
       [
